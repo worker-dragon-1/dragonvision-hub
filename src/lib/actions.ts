@@ -14,7 +14,7 @@ import {
   writeBatch,
   type WriteBatch,
 } from "firebase/firestore";
-import { db } from "./firebase";
+import { db } from "./db";
 import { DEFAULT_TEMPLATES } from "./prospects";
 import { clientStatus, type PlanItem } from "./finance";
 import { fmtMoney } from "./money";
@@ -344,7 +344,7 @@ export async function saveFinance(projectId: string, input: FinanceInput, previo
 }
 
 // ── payouts ────────────────────────────────────────────────────────────────
-const whose = (type: PayoutDoc["type"]) => (type === "commission" ? "عمولتك" : "مستحقك");
+const whose = () => "مستحقك";
 
 function payoutNotification(
   batch: WriteBatch,
@@ -403,7 +403,7 @@ export async function markPayoutsReady(
         projectId: p.projectId,
         payoutId: p.id,
         // only THIS member's own amount
-        text: `${whose(p.type)} عن مشروع «${projectTitle}» ${p.type === "commission" ? "جاهزة" : "جاهز"} للدفع: ${fmtMoney(p.amount)}. يُدفع قبل ${fmtDate(due)}.`,
+        text: `${whose()} عن مشروع «${projectTitle}» جاهز للدفع: ${fmtMoney(p.amount)}. يُدفع قبل ${fmtDate(due)}.`,
       });
     });
   await batch.commit();
@@ -417,7 +417,7 @@ export async function markPayoutPaid(p: WithId<PayoutDoc>, method: string) {
     type: "payout_paid",
     projectId: p.projectId,
     payoutId: p.id,
-    text: `تم دفع ${whose(p.type)} عن مشروع «${p.projectTitle}»: ${fmtMoney(p.amount)}${method.trim() ? ` (${method.trim()})` : ""}.`,
+    text: `تم دفع ${whose()} عن مشروع «${p.projectTitle}»: ${fmtMoney(p.amount)}${method.trim() ? ` (${method.trim()})` : ""}.`,
   });
   await batch.commit();
 }

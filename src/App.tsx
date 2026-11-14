@@ -1,26 +1,13 @@
-import type { ReactNode } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { isConfigured } from "./lib/env";
 import { ROUTES, homeFor, type RouteKey } from "./lib/roles";
-import { Layout } from "./components/Layout";
 import { RequireRole } from "./components/RequireRole";
-import { LoadingScreen } from "./components/StatusScreen";
+import { LoadingScreen, PageLoading } from "./components/StatusScreen";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { Login } from "./pages/Login";
 import { Placeholder } from "./pages/Placeholder";
-import { TeamPage } from "./pages/Team";
-import { ProjectsPage } from "./pages/Projects";
-import { ProjectPage } from "./pages/ProjectPage";
-import { AllTasksPage, MyTasksPage } from "./pages/MyTasks";
-import { ReviewQueuePage } from "./pages/ReviewQueue";
-import { NotificationsPage } from "./pages/Notifications";
-import { ProspectsPage } from "./pages/Prospects";
-import { ProspectPage } from "./pages/ProspectPage";
-import { ImportProspectsPage } from "./pages/ImportProspects";
-import { TemplatesPage } from "./pages/Templates";
-import { DashboardPage } from "./pages/Dashboard";
-import { MyPayoutsPage, PayoutsPage } from "./pages/Payouts";
-import { SettingsPage } from "./pages/SettingsPage";
 import {
   DeactivatedScreen,
   ErrorScreen,
@@ -29,6 +16,24 @@ import {
   SetupScreen,
   VerifyEmailScreen,
 } from "./pages/AuthScreens";
+
+// Everything after sign-in is loaded on demand, so the login page only downloads what it needs.
+const Layout = lazy(() => import("./components/Layout").then((m) => ({ default: m.Layout })));
+const TeamPage = lazy(() => import("./pages/Team").then((m) => ({ default: m.TeamPage })));
+const ProjectsPage = lazy(() => import("./pages/Projects").then((m) => ({ default: m.ProjectsPage })));
+const ProjectPage = lazy(() => import("./pages/ProjectPage").then((m) => ({ default: m.ProjectPage })));
+const AllTasksPage = lazy(() => import("./pages/MyTasks").then((m) => ({ default: m.AllTasksPage })));
+const MyTasksPage = lazy(() => import("./pages/MyTasks").then((m) => ({ default: m.MyTasksPage })));
+const ReviewQueuePage = lazy(() => import("./pages/ReviewQueue").then((m) => ({ default: m.ReviewQueuePage })));
+const NotificationsPage = lazy(() => import("./pages/Notifications").then((m) => ({ default: m.NotificationsPage })));
+const ProspectsPage = lazy(() => import("./pages/Prospects").then((m) => ({ default: m.ProspectsPage })));
+const ProspectPage = lazy(() => import("./pages/ProspectPage").then((m) => ({ default: m.ProspectPage })));
+const ImportProspectsPage = lazy(() => import("./pages/ImportProspects").then((m) => ({ default: m.ImportProspectsPage })));
+const TemplatesPage = lazy(() => import("./pages/Templates").then((m) => ({ default: m.TemplatesPage })));
+const DashboardPage = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.DashboardPage })));
+const PayoutsPage = lazy(() => import("./pages/Payouts").then((m) => ({ default: m.PayoutsPage })));
+const MyPayoutsPage = lazy(() => import("./pages/Payouts").then((m) => ({ default: m.MyPayoutsPage })));
+const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 
 const PAGES: Partial<Record<RouteKey, ReactNode>> = {
   team: <TeamPage />,
@@ -49,6 +54,7 @@ function AppRoutes() {
   const { role } = useAuth();
   if (!role) return null;
   return (
+    <Suspense fallback={<PageLoading />}>
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<Navigate to={homeFor(role)} replace />} />
@@ -77,6 +83,7 @@ function AppRoutes() {
         <Route path="*" element={<Navigate to={homeFor(role)} replace />} />
       </Route>
     </Routes>
+    </Suspense>
   );
 }
 
@@ -109,6 +116,7 @@ export default function App() {
       <BrowserRouter>
         <Gate />
       </BrowserRouter>
+      <UpdateBanner />
     </AuthProvider>
   );
 }

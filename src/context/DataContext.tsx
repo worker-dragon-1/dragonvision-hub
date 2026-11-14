@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { collection, collectionGroup, doc, onSnapshot, query, where, type Query } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db } from "../lib/db";
 import { useAuth } from "./AuthContext";
 import { errorMessage } from "../lib/authErrors";
 import { DEFAULT_FINANCE_SETTINGS } from "../lib/finance";

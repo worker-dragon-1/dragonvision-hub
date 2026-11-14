@@ -7,12 +7,11 @@ import { Field } from "../components/Forms";
 import { saveFinanceSettings } from "../lib/actions";
 import { errorMessage } from "../lib/authErrors";
 import { DEFAULT_FINANCE_SETTINGS } from "../lib/finance";
-import { fmtMoney, fmtPercent, parseMoney } from "../lib/money";
+import { fmtMoney, parseMoney } from "../lib/money";
 
 /** Director only: settings/finance. */
 export function SettingsPage() {
   const { financeSettings, loaded } = useData();
-  const [rate, setRate] = useState(String(financeSettings.defaultCommissionRate));
   const [min, setMin] = useState(String(financeSettings.minProjectPrice));
   const [delay, setDelay] = useState(String(financeSettings.paymentDelayDays));
   const [busy, setBusy] = useState(false);
@@ -22,24 +21,23 @@ export function SettingsPage() {
   // pick up the stored values once they arrive
   useEffect(() => {
     if (!loaded) return;
-    setRate(String(financeSettings.defaultCommissionRate));
     setMin(String(financeSettings.minProjectPrice));
     setDelay(String(financeSettings.paymentDelayDays));
   }, [loaded, financeSettings]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    const r = parseMoney(rate);
     const m = parseMoney(min);
     const d = /^\d+$/.test(delay.trim()) ? Number(delay) : null;
-    if (r === null || r > 100) return setError("نسبة العمولة بين 0 و100.");
     if (m === null) return setError("الحد الأدنى للسعر رقم صحيح.");
     if (d === null || d > 365) return setError("مدة الدفع عدد أيام صحيح (0–365).");
     setBusy(true);
     setError(null);
     setSaved(false);
     try {
-      await saveFinanceSettings({ defaultCommissionRate: r, minProjectPrice: m, paymentDelayDays: d });
+      // defaultCommissionRate is no longer editable (no commissions for now) but the settings
+      // document keeps it, unchanged, because firestore.rules require the field.
+      await saveFinanceSettings({ defaultCommissionRate: financeSettings.defaultCommissionRate, minProjectPrice: m, paymentDelayDays: d });
       setSaved(true);
     } catch (err) {
       setError(errorMessage(err));
@@ -53,9 +51,6 @@ export function SettingsPage() {
     <div className="mx-auto max-w-xl">
       <PageHeader title="الإعدادات" subtitle="إعدادات المالية — للمخرج فقط." />
       <form onSubmit={submit} className="card space-y-5 p-5 sm:p-6" noValidate>
-        <Field label="نسبة العمولة الافتراضية (%)" htmlFor="s-rate" hint={`تُستعمل كقيمة مبدئية في كل مشروع (الافتراضي ${fmtPercent(D.defaultCommissionRate)}).`}>
-          <input id="s-rate" inputMode="decimal" dir="ltr" className="input input-ltr" value={rate} onChange={(e) => { setRate(e.target.value); setSaved(false); }} />
-        </Field>
         <Field label="الحد الأدنى لسعر المشروع (د.ت)" htmlFor="s-min" hint={`يظهر تنبيه إن كان السعر أقل منه — دون منع الحفظ (الافتراضي ${fmtMoney(D.minProjectPrice)}).`}>
           <input id="s-min" inputMode="decimal" dir="ltr" className="input input-ltr" value={min} onChange={(e) => { setMin(e.target.value); setSaved(false); }} />
         </Field>

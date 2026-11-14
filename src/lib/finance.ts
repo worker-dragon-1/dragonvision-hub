@@ -14,26 +14,26 @@ export const round3 = (n: number) => Math.round(n * 1000) / 1000;
 export interface FinanceNumbers {
   price: number;
   toolsCost: number;
-  commissionRate: number; // percent
-  salesMemberId: string;
   shares: Record<string, number>;
   amountPaidByClient: number;
 }
 
 export interface Breakdown {
-  commission: number;
   sharesTotal: number;
   margin: number;
   /** margin as a fraction of the price (0 when price is 0) */
   marginRatio: number;
 }
 
-/** margin = price − toolsCost − Σ shares − commission.  commission = price × rate%. */
+/**
+ * margin = price − toolsCost − Σ shares.
+ * No commissions for now: finance docs still carry commissionRate = 0 and salesMemberId = ""
+ * (so the shape stays compatible with firestore.rules), but they never enter the maths.
+ */
 export function breakdown(f: FinanceNumbers): Breakdown {
   const sharesTotal = round3(Object.values(f.shares).reduce((a, b) => a + b, 0));
-  const commission = f.salesMemberId ? round3((f.price * f.commissionRate) / 100) : 0;
-  const margin = round3(f.price - f.toolsCost - sharesTotal - commission);
-  return { commission, sharesTotal, margin, marginRatio: f.price > 0 ? margin / f.price : 0 };
+  const margin = round3(f.price - f.toolsCost - sharesTotal);
+  return { sharesTotal, margin, marginRatio: f.price > 0 ? margin / f.price : 0 };
 }
 
 export type ClientStatus = "unpaid" | "partial" | "paid";
@@ -54,10 +54,9 @@ export function financeWarnings(f: FinanceNumbers, minPrice: number): string[] {
   const b = breakdown(f);
   if (f.price > 0 && f.price < minPrice) out.push(`السعر أقل من الحد الأدنى للمشاريع (${fmtMoney(minPrice)}).`);
   if (f.price > 0) {
-    if (b.margin < 0) out.push(`الهامش سالب (${fmtMoney(b.margin)}): المصاريف والحصص والعمولة تتجاوز السعر.`);
+    if (b.margin < 0) out.push(`الهامش سالب (${fmtMoney(b.margin)}): المصاريف والحصص تتجاوز السعر.`);
     else if (b.marginRatio < 0.2) out.push(`الهامش ${fmtPercent(Math.round(b.marginRatio * 1000) / 10)} من السعر — أقل من 20%.`);
   }
-  if (f.salesMemberId === "" && f.commissionRate > 0 && f.price > 0) out.push("لم يُحدَّد مسؤول المبيعات، لذلك لا تُحسب عمولة.");
   return out;
 }
 
@@ -80,17 +79,13 @@ export interface PlanItem {
 const same = (a: number, b: number) => Math.abs(a - b) < 0.0005;
 
 /**
- * One payout per share + one commission payout. Deterministic ids make re-running safe:
+ * One payout (type "fee") per share. Deterministic ids make re-running safe:
  * existing unpaid payouts get their amount updated, paid ones are never touched.
  */
 export function planPayouts(projectId: string, f: ProjectFinanceDoc, existing: WithId<PayoutDoc>[]): PlanItem[] {
-  const b = breakdown(f);
-  const wanted: { memberId: string; type: PayoutType; amount: number }[] = [
-    ...Object.entries(f.shares)
-      .filter(([, amount]) => amount > 0)
-      .map(([memberId, amount]) => ({ memberId, type: "fee" as const, amount })),
-    ...(f.salesMemberId && b.commission > 0 ? [{ memberId: f.salesMemberId, type: "commission" as const, amount: b.commission }] : []),
-  ];
+  const wanted: { memberId: string; type: PayoutType; amount: number }[] = Object.entries(f.shares)
+    .filter(([, amount]) => amount > 0)
+    .map(([memberId, amount]) => ({ memberId, type: "fee" as const, amount }));
   const mine = existing.filter((p) => p.projectId === projectId);
   const items: PlanItem[] = wanted.map((w) => {
     const id = payoutId(projectId, w.memberId, w.type);

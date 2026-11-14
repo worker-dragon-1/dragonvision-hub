@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { PAYOUT_STATUS_LABELS } from "../lib/labels";
 import type { PayoutStatus, PayoutType } from "../lib/types";
 
-export const PAYOUT_TYPE_LABELS: Record<PayoutType, string> = { fee: "أجر", commission: "عمولة" };
+// No commissions for now: a (legacy) "commission" payout is simply shown as a plain payout.
+export const PAYOUT_TYPE_LABELS: Record<PayoutType, string> = { fee: "أجر", commission: "مستحق" };
 
 const STATUS_STYLE: Record<PayoutStatus, string> = {
   awaiting_client_payment: "border-line bg-surface-2 text-muted",

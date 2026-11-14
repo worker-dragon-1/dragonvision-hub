@@ -53,8 +53,8 @@ Exactly five roles. **Enforced in `firestore.rules`**; the UI only hides what th
 |---|:-:|:-:|:-:|:-:|:-:|
 | Invite / remove members, assign roles, deactivate | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Approve deliveries (`approved` / `changes_requested`) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| See / edit prices, tools cost, deposit, client payments, shares, commission (`projects/*/private/finance`) — including the dashboard's collection-group query | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Read / write `settings/finance` (default commission, minimum price, payment delay) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| See / edit prices, tools cost, deposit, client payments, shares (`projects/*/private/finance`) — including the dashboard's collection-group query | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Read / write `settings/finance` (minimum price, payment delay; the commission default is kept in the doc but hidden) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | See everyone's payouts | ✅ | ❌ | ❌ | ❌ | ❌ |
 | See **own** payouts (never prices, other members' amounts or the margin) | — | ✅ | ✅ | ✅ | ✅ |
 | Create / update / delete payouts, mark ready (client paid **in full**) and paid | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -166,8 +166,8 @@ Amounts are plain numbers **in dinars** (up to 3 decimals). The rules accept wri
 |---|---|---|
 | `price`, `toolsCost` | number | ≥ 0 |
 | `currency` | `"TND"` | |
-| `commissionRate` | number | **percent** 0–100 (12 = 12 %). *(Was drafted as 0–1; nothing was stored yet.)* |
-| `salesMemberId` | string | a sales member, or `""` = no commission. Default in the UI: the assignee of the linked prospect |
+| `commissionRate` | number | **always saved as `0`** — commissions are switched off (see below). Percent 0–100 if they ever return |
+| `salesMemberId` | string | **always saved as `""`** (no commission earner) |
 | `shares` | map `uid → amount` | only **current project members** (rules check this) |
 | `depositAmount` | number | agreed/received deposit (informational) |
 | `depositReceivedAt` | timestamp \| null | |
@@ -176,14 +176,17 @@ Amounts are plain numbers **in dinars** (up to 3 decimals). The rules accept wri
 | `payments` | `{ amount, at }[]` | appended automatically whenever `amountPaidByClient` changes (negative = correction) — lets the dashboard know what arrived *this month* |
 | `updatedAt` | timestamp | |
 
-Derived (never stored): `commission = price × commissionRate %` (only when a sales member is set) and
-**director margin = price − toolsCost − Σ shares − commission**. Client status: unpaid / partial / paid.
+Derived (never stored): **director margin = price − toolsCost − Σ shares**. Client status: unpaid / partial / paid.
+
+> **Commissions are disabled (business decision).** The UI shows no commission fields, lines or wording, finance docs are always saved with `commissionRate: 0` and `salesMemberId: ""`
+> (so they stay valid for the unchanged `firestore.rules`), and **no `commission` payouts are ever created**. To pay someone on a project — the sales member included — add them as a
+> project member, then give them a share (the finance block says so). `settings/finance.defaultCommissionRate` stays in the document, untouched, only because the rules require the field.
 The UI *warns* (never blocks) when the price is below `minProjectPrice`, or the margin is negative or under 20 % of the price.
 
 ### `settings/finance`  — **director only**
 | Field | Type | Notes |
 |---|---|---|
-| `defaultCommissionRate` | number | percent, default **12** |
+| `defaultCommissionRate` | number | not editable any more (commissions off); kept unchanged because the rules require the field |
 | `minProjectPrice` | number | default **500** (dinars) |
 | `paymentDelayDays` | integer | default **3**: a payout becomes due this many days after it turns `ready` |
 
@@ -281,7 +284,7 @@ The **id is `${projectId}_${memberId}_${type}`** (rules enforce it), so "create 
 | `projectTitle` | string | denormalised, so a member never needs to read the project |
 | `memberId` | string | immutable; never the director. A member reads **only** payouts where this is their uid |
 | `amount` | number | TND ≥ 0 |
-| `type` | `fee` \| `commission` | one `fee` per share + one `commission` for the sales member |
+| `type` | `fee` \| `commission` | one `fee` per share. `commission` is allowed by the rules but never created |
 | `status` | `awaiting_client_payment` \| `ready` \| `paid` | flow below |
 | `method` | string | note when paid: "نقداً", "D17"… |
 | `createdAt`, `updatedAt` | timestamp | |
@@ -322,7 +325,7 @@ payouts with `where("memberId", "==", uid)`. An unconstrained list query by a no
   15. a non-director cannot create, update or delete any payout (including their own status) — and the director is held to the id / status-flow rules
   16. a non-director cannot read or write `settings/finance`
   (test 3 also covers: a member can read only their own payouts, by id and by an own-only query; unfiltered list denied)
-* **Finance flow check** (not committed): director opens a project with an editor and a sales member → fills finance (800 / tools 150 / editor share 120 / 12 % commission) → checks the breakdown
+* **Finance flow check** (not committed): director opens a project with an editor and a sales member → fills finance (800 / tools 150 / editor share 120) → checks the breakdown
   (434, 54.3 %) and the warnings → creates payouts, runs it again (no duplicates, "no changes"), changes and restores a share → records the client paying partially then in full → payouts become ready →
   marks the editor's payout paid (D17). The editor's مستحقاتي shows only their amount; every page the editor and the sales user can open is scanned for price / margin / commission / other amounts (none),
   and REST calls by the editor to the finance doc, the collection-group query, all payouts and settings are denied. Dashboard numbers are checked against seeded fixtures, and RTL money rendering is measured.
@@ -369,6 +372,15 @@ src/lib/workflow.ts        stage order, stage gate, allowed transitions
 src/lib/actions.ts         every workflow write (task + notification in one batch)
 tests/                     Firestore rules tests
 ```
+
+## 7b. Performance & updates (PWA)
+
+* **Lazy loading.** Only the login page is in the startup bundle. Every page after sign-in is a lazy chunk (`React.lazy` + an RTL loading state), the Firestore SDK (the biggest dependency) is loaded
+  **after** the login page paints (in the background, or immediately after sign-in), and vendors are split into stable chunks (`vendor-react`, `vendor-auth`, `vendor-firestore`, `vendor-firebase`).
+  Login-page JS before first paint: **1 089 kB → 381 kB raw (322 kB → 121 kB gzip)**.
+* **"New version available".** The service worker runs in *prompt* mode (`registerType: "prompt"`, `clientsClaim`): a freshly deployed build waits in the background and a banner
+  «نسخة جديدة متاحة — تحديث» appears; tapping it activates the new worker and reloads. The app checks for a new version on every focus / return to the tab (rate-limited) and hourly.
+  Previously (`autoUpdate`) a returning user could keep running an old cached build.
 
 ## 8. Deploying
 

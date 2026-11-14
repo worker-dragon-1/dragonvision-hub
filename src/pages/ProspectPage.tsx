@@ -5,7 +5,7 @@ import {
   ArrowRight, Building2, CalendarClock, CalendarPlus, ExternalLink, Globe, FolderPlus, Loader2, MapPin,
   MessageCircle, MessageSquareText, Pencil, Phone, Search, Send, StickyNote, Trash2, Users, Handshake, Link2, type LucideIcon,
 } from "lucide-react";
-import { db } from "../lib/firebase";
+import { db } from "../lib/db";
 import { useAuth } from "../context/AuthContext";
 import { useData } from "../context/DataContext";
 import { ErrorNote } from "../components/Bits";

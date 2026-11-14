@@ -11,7 +11,7 @@ import {
   where,
 } from "firebase/firestore";
 import { AlertCircle, Check, Copy, Loader2, Mail, UserCheck, UserPlus, UserX, X } from "lucide-react";
-import { db } from "../lib/firebase";
+import { db } from "../lib/db";
 import { DIRECTOR_EMAIL } from "../lib/env";
 import { useAuth } from "../context/AuthContext";
 import { COL, MEMBER_ROLES, type InviteDoc, type MemberRole, type UserDoc, type WithId } from "../lib/types";

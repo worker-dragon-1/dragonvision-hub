@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Landmark, Loader2, Lock, Wallet } from "lucide-react";
 import { useData } from "../context/DataContext";
-import { Field, Select } from "./Forms";
+import { Field } from "./Forms";
 import { ErrorNote } from "./Bits";
 import { PAYOUT_TYPE_LABELS, PayoutStatusBadge } from "./MoneyBits";
 import { applyPayoutPlan, markPayoutsReady, saveFinance, type FinanceInput } from "../lib/actions";
@@ -31,22 +31,16 @@ function Line({ label, value, strong, tone }: { label: string; value: string; st
  * (`finances`, settings) is subscribed to only for the director.
  */
 export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
-  const { finances, financeSettings, users, prospects, payouts } = useData();
+  const { finances, financeSettings, users, payouts } = useData();
   const saved = finances[project.id];
 
   const members = useMemo(() => users.filter((u) => project.memberIds.includes(u.id)), [users, project.memberIds]);
-  const salesUsers = useMemo(() => users.filter((u) => u.active && u.role === "sales"), [users]);
-  // default commission earner: the assignee of the linked prospect
-  const prospect = prospects.find((p) => p.id === project.prospectId);
-  const defaultSales = prospect && salesUsers.some((u) => u.id === prospect.assigneeId) ? prospect.assigneeId : "";
 
   const [price, setPrice] = useState(saved ? String(saved.price) : "");
   const [tools, setTools] = useState(saved ? String(saved.toolsCost) : "");
   const [deposit, setDeposit] = useState(saved ? String(saved.depositAmount) : "");
   const [depositDate, setDepositDate] = useState(toInputDate(saved?.depositReceivedAt));
   const [paid, setPaid] = useState(saved ? String(saved.amountPaidByClient) : "");
-  const [rate, setRate] = useState(String(saved?.commissionRate ?? financeSettings.defaultCommissionRate));
-  const [sales, setSales] = useState(saved?.salesMemberId ?? defaultSales);
   const [shares, setShares] = useState<Record<string, string>>(
     Object.fromEntries(members.map((m) => [m.id, saved?.shares[m.id] ? String(saved.shares[m.id]) : ""])),
   );
@@ -56,16 +50,14 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
 
   // parsed draft
   const parsed = {
-    price: num(price), toolsCost: num(tools), depositAmount: num(deposit), amountPaidByClient: num(paid), commissionRate: num(rate),
+    price: num(price), toolsCost: num(tools), depositAmount: num(deposit), amountPaidByClient: num(paid),
   };
   const shareValues = Object.fromEntries(members.map((m) => [m.id, num(shares[m.id] ?? "")]));
-  const invalid = Object.values(parsed).includes(null) || Object.values(shareValues).includes(null) || (parsed.commissionRate ?? 0) > 100;
+  const invalid = Object.values(parsed).includes(null) || Object.values(shareValues).includes(null);
   const n = (v: number | null) => v ?? 0;
   const draft = {
     price: n(parsed.price),
     toolsCost: n(parsed.toolsCost),
-    commissionRate: n(parsed.commissionRate),
-    salesMemberId: sales,
     shares: Object.fromEntries(Object.entries(shareValues).filter(([, v]) => n(v) > 0).map(([k, v]) => [k, n(v)])),
     amountPaidByClient: n(parsed.amountPaidByClient),
   };
@@ -75,8 +67,7 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
 
   const dirty =
     !saved ||
-    saved.price !== draft.price || saved.toolsCost !== draft.toolsCost || saved.commissionRate !== draft.commissionRate ||
-    saved.salesMemberId !== sales || saved.amountPaidByClient !== draft.amountPaidByClient ||
+    saved.price !== draft.price || saved.toolsCost !== draft.toolsCost || saved.amountPaidByClient !== draft.amountPaidByClient ||
     saved.depositAmount !== n(parsed.depositAmount) || toInputDate(saved.depositReceivedAt) !== depositDate ||
     JSON.stringify(saved.shares) !== JSON.stringify(draft.shares);
 
@@ -106,8 +97,9 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
         depositAmount: n(parsed.depositAmount),
         depositReceivedAt: fromInputDate(depositDate),
         amountPaidByClient: draft.amountPaidByClient,
-        commissionRate: draft.commissionRate,
-        salesMemberId: sales,
+        // no commissions for now — kept in the document only so it stays valid for firestore.rules
+        commissionRate: 0,
+        salesMemberId: "",
         shares: draft.shares,
       };
       await saveFinance(project.id, input, saved);
@@ -172,20 +164,11 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
         </div>
       </div>
 
-      <div className="mt-5 grid gap-4 border-t border-line pt-5 sm:grid-cols-2">
-        <Field label="عمولة المبيعات: العضو" htmlFor="f-sales" hint={prospect && defaultSales ? "الافتراضي: مسؤول الزبون المحتمل المرتبط." : undefined}>
-          <Select id="f-sales" value={sales} onChange={(e) => setSales(e.target.value)}>
-            <option value="">بدون عمولة</option>
-            {salesUsers.map((u) => <option key={u.id} value={u.id}>{u.displayName}</option>)}
-          </Select>
-        </Field>
-        <Field label="نسبة العمولة (%)" htmlFor="f-rate" hint="تُحسب من سعر المشروع.">
-          <input id="f-rate" inputMode="decimal" dir="ltr" className="input input-ltr" value={rate} onChange={(e) => setRate(e.target.value)} />
-        </Field>
-      </div>
-
       <div className="mt-5 border-t border-line pt-5">
-        <h3 className="mb-3 text-sm font-bold text-muted">حصص أعضاء المشروع (د.ت)</h3>
+        <h3 className="mb-2 text-sm font-bold text-muted">حصص أعضاء المشروع (د.ت)</h3>
+        <p data-testid="shares-hint" className="mb-3 rounded-xl bg-surface-2 p-3 text-xs leading-6 text-muted">
+          لدفع مبلغ لأي شخص في هذا المشروع (بمن فيهم مسؤول المبيعات)، أضِفه أولاً كعضو في المشروع، ثم حدّد مبلغه هنا.
+        </p>
         {members.length === 0 ? (
           <p className="text-sm text-muted">أضف أعضاء إلى المشروع لتوزيع الحصص عليهم.</p>
         ) : (
@@ -216,7 +199,6 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
         <Line label="سعر المشروع" value={fmtMoney(draft.price)} />
         <Line label="تكلفة الأدوات" value={fmtMoney(-draft.toolsCost)} />
         <Line label="حصص الفريق" value={fmtMoney(-b.sharesTotal)} />
-        <Line label={`عمولة المبيعات (${fmtPercent(draft.commissionRate)})`} value={fmtMoney(-b.commission)} />
         <Line
           strong
           label={`هامش المخرج${draft.price > 0 ? ` (${fmtPercent(Math.round(b.marginRatio * 1000) / 10)})` : ""}`}

@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { Bell, LogOut, Settings } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
@@ -5,6 +6,7 @@ import { DataProvider, useData } from "../context/DataContext";
 import { navFor, sidebarFor, type AppRoute } from "../lib/roles";
 import { ROLE_LABELS } from "../lib/labels";
 import { Logo, LogoMark } from "./Logo";
+import { PageLoading } from "./StatusScreen";
 import { TaskDetailHost } from "./TaskViews";
 import { TemplateSeeder } from "./TemplateSeeder";
 
@@ -180,7 +182,9 @@ function Shell() {
               <button onClick={reload} className="btn-ghost min-h-9 px-3 text-sm">إعادة المحاولة</button>
             </div>
           )}
-          <Outlet />
+          <Suspense fallback={<PageLoading />}>
+            <Outlet />
+          </Suspense>
         </main>
       </div>
       <BottomNav items={items} badges={badges} />

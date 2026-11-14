@@ -40,6 +40,18 @@ export function StatusScreen({
   );
 }
 
+/** Shown inside the app shell while a lazily loaded page downloads. */
+export function PageLoading() {
+  return (
+    <div className="grid place-items-center py-24" role="status" aria-live="polite">
+      <div className="flex flex-col items-center gap-3">
+        <LogoMark className="size-10 animate-pulse" />
+        <p className="text-sm text-muted">جارٍ التحميل…</p>
+      </div>
+    </div>
+  );
+}
+
 export function LoadingScreen({ label = "جارٍ التحميل…" }: { label?: string }) {
   return (
     <main className="grid min-h-dvh place-items-center" role="status" aria-live="polite">

@@ -21,8 +21,8 @@ import {
   updateProfile,
   type User,
 } from "firebase/auth";
-import { doc, getDoc, onSnapshot, serverTimestamp, writeBatch } from "firebase/firestore";
-import { auth, db } from "../lib/firebase";
+import { auth } from "../lib/firebase";
+import { loadFirestore } from "../lib/firestoreLoader";
 import { DIRECTOR_EMAIL } from "../lib/env";
 import { COL, type InviteDoc, type Role, type UserDoc, type WithId } from "../lib/types";
 import { errorMessage } from "../lib/authErrors";
@@ -95,21 +95,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!uid || !verified) return;
     setProfile(undefined);
-    return onSnapshot(
-      doc(db, COL.users, uid),
-      (snap) => {
-        // The client creates this doc itself on first sign-in. Its optimistic local
-        // snapshot appears BEFORE the server has committed it, and rules can't see
-        // the user yet — so wait for the server-confirmed version, otherwise the
-        // data listeners start too early and are rejected for good.
-        if (snap.exists() && snap.metadata.hasPendingWrites) return;
-        setProfile(snap.exists() ? { id: snap.id, ...(snap.data() as UserDoc) } : null);
-      },
-      (err) => {
-        setErrorText(errorMessage(err));
-        setProvisionState("error");
-      },
-    );
+    let cancelled = false;
+    let off: (() => void) | undefined;
+    const fail = (err: unknown) => {
+      setErrorText(errorMessage(err));
+      setProvisionState("error");
+    };
+    loadFirestore()
+      .then(({ fs, db }) => {
+        if (cancelled) return;
+        off = fs.onSnapshot(
+          fs.doc(db, COL.users, uid),
+          (snap) => {
+            // The client creates this doc itself on first sign-in. Its optimistic local
+            // snapshot appears BEFORE the server has committed it, and rules can't see
+            // the user yet — so wait for the server-confirmed version, otherwise the
+            // data listeners start too early and are rejected for good.
+            if (snap.exists() && snap.metadata.hasPendingWrites) return;
+            setProfile(snap.exists() ? { id: snap.id, ...(snap.data() as UserDoc) } : null);
+          },
+          fail,
+        );
+      })
+      .catch(fail);
+    return () => {
+      cancelled = true;
+      off?.();
+    };
   }, [uid, verified]);
 
   // 3) First sign-in: create the profile with the INVITED role (or director).
@@ -124,11 +136,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const email = (fbUser.email ?? "").toLowerCase();
         const isDirectorEmail = !!DIRECTOR_EMAIL && email === DIRECTOR_EMAIL;
         let role: Role = "director";
-        const batch = writeBatch(db);
+        const { fs, db } = await loadFirestore();
+        const batch = fs.writeBatch(db);
 
         if (!isDirectorEmail) {
-          const inviteRef = doc(db, COL.invites, email);
-          const invite = await getDoc(inviteRef);
+          const inviteRef = fs.doc(db, COL.invites, email);
+          const invite = await fs.getDoc(inviteRef);
           const data = invite.exists() ? (invite.data() as InviteDoc) : null;
           if (!data || data.status !== "pending") {
             setProvisionState("no-invite");
@@ -138,12 +151,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           batch.update(inviteRef, { status: "accepted" });
         }
 
-        batch.set(doc(db, COL.users, fbUser.uid), {
+        batch.set(fs.doc(db, COL.users, fbUser.uid), {
           displayName: fbUser.displayName?.trim() || email.split("@")[0],
           email,
           role,
           active: true,
-          createdAt: serverTimestamp(),
+          createdAt: fs.serverTimestamp(),
         });
         await batch.commit();
         setProvisionState("idle"); // the snapshot listener delivers the new profile
