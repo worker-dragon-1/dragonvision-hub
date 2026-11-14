@@ -1,0 +1,659 @@
+rules_version = '2';
+
+// DragonVision Hub — Firestore security rules.
+// Every permission in the app is enforced HERE, not just in the UI.
+// Schema + permission table: see README.md.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ════════════════════════════════════════════════════════════════════
+    //  >>>  DIRECTOR EMAIL — FILL IN HERE (the ONE place in this file)  <<<
+    //  Must equal VITE_DIRECTOR_EMAIL in .env. The person who signs in
+    //  (with a VERIFIED address) using this email becomes the director.
+    // ════════════════════════════════════════════════════════════════════
+    function DIRECTOR_EMAIL() {
+      return 'm.abderrahmenmagdoud@gmail.com';
+    }
+
+    // ── Identity helpers ────────────────────────────────────────────────
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Email/password accounts must verify their address first, otherwise
+    // anyone could register with the director's (or an invitee's) email.
+    // Google accounts are always verified.
+    function emailVerified() {
+      return signedIn() && request.auth.token.email_verified == true;
+    }
+
+    function authEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(userPath());
+    }
+
+    function me() {
+      return get(userPath()).data;
+    }
+
+    // A deactivated member (active != true) fails every check below
+    // immediately — rules read the flag on every request.
+    function isActive() {
+      return hasProfile() && me().active == true;
+    }
+
+    function isRole(r) {
+      return isActive() && me().role == r;
+    }
+
+    function isDirector() {
+      return isRole('director');
+    }
+
+    function isDirectorOrSales() {
+      return isActive() && (me().role == 'director' || me().role == 'sales');
+    }
+
+    // The director role is NOT assignable: it exists only for DIRECTOR_EMAIL.
+    function memberRoles() {
+      return ['sales', 'editor', 'audio', 'gen_assistant'];
+    }
+
+    function validStage(s) {
+      return s in ['lead', 'script', 'generation', 'audio', 'editing', 'review', 'delivered'];
+    }
+
+    // Pipeline order. A project moves forward ONE stage at a time (so it can
+    // never reach 'delivered' without passing 'review'); it may move back.
+    function stageRank(s) {
+      return {'lead': 0, 'script': 1, 'generation': 2, 'audio': 3, 'editing': 4, 'review': 5, 'delivered': 6}[s];
+    }
+
+    function validStageMove(oldStage, newStage) {
+      return newStage == oldStage
+        || stageRank(newStage) == stageRank(oldStage) + 1
+        || stageRank(newStage) < stageRank(oldStage);
+    }
+
+    function userDocPath(id) {
+      return /databases/$(database)/documents/users/$(id);
+    }
+
+    function projectPath(id) {
+      return /databases/$(database)/documents/projects/$(id);
+    }
+
+    function taskPath(id) {
+      return /databases/$(database)/documents/tasks/$(id);
+    }
+
+    function payoutPath(id) {
+      return /databases/$(database)/documents/payouts/$(id);
+    }
+
+    function financePath(pid) {
+      return /databases/$(database)/documents/projects/$(pid)/private/finance;
+    }
+
+    // Money: plain non-negative numbers in dinars (millimes allowed).
+    function money(v) {
+      return v is number && v >= 0 && v <= 100000000;
+    }
+
+    // Deliverables are Google Drive (or any) http(s) links — never files.
+    function validUrl(u) {
+      return u is string && u.size() <= 2000 && u.matches('https?://[^ ]+');
+    }
+
+    function urlOrEmpty(u) {
+      return u is string && (u == '' || validUrl(u));
+    }
+
+    function dateOrNull(v) {
+      return v == null || v is timestamp;
+    }
+
+    // ── Invites ─────────────────────────────────────────────────────────
+    // Invite doc id == the invitee's lower-cased email, so rules can look
+    // it up directly (rules cannot run queries).
+    function invitePath(email) {
+      return /databases/$(database)/documents/invites/$(email);
+    }
+
+    function invitePending(email, role) {
+      return exists(invitePath(email))
+        && get(invitePath(email)).data.status == 'pending'
+        && get(invitePath(email)).data.role == role;
+    }
+
+    function validInvite(inviteId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['email', 'role', 'invitedBy', 'status', 'createdAt'])
+        && d.keys().hasAll(['email', 'role', 'invitedBy', 'status', 'createdAt'])
+        && d.email is string
+        && d.email == d.email.lower()
+        && d.email == inviteId
+        && d.role in memberRoles()
+        && d.invitedBy == request.auth.uid
+        && d.status == 'pending'
+        && d.createdAt == request.time;
+    }
+
+    // ═══════════════════════ users/{uid} ═══════════════════════
+    match /users/{uid} {
+      // Active members can read the team directory (names/roles).
+      // A deactivated member may still read ONLY their own profile so the
+      // app can tell them their account is deactivated.
+      allow get: if isActive() || (signedIn() && request.auth.uid == uid);
+      allow list: if isActive();
+
+      // First sign-in: the profile is created by the user themself, but the
+      // role is NOT their choice. It must be 'director' (director email) or
+      // exactly the role of a pending invite for their verified email.
+      allow create: if emailVerified()
+        && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['displayName', 'email', 'role', 'active', 'createdAt'])
+        && request.resource.data.keys().hasAll(['displayName', 'email', 'role', 'active', 'createdAt'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() > 0
+        && request.resource.data.displayName.size() <= 100
+        && request.resource.data.email == authEmail()
+        && request.resource.data.active == true
+        && request.resource.data.createdAt == request.time
+        && (
+          (authEmail() == DIRECTOR_EMAIL().lower() && request.resource.data.role == 'director')
+          || (request.resource.data.role in memberRoles()
+              && invitePending(authEmail(), request.resource.data.role))
+        );
+
+      allow update: if
+        // A member may change ONLY their own display name — never role/active.
+        (isActive()
+          && request.auth.uid == uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() > 0
+          && request.resource.data.displayName.size() <= 100)
+        ||
+        // The director manages OTHER non-director members: role + active only.
+        (isDirector()
+          && request.auth.uid != uid
+          && resource.data.role != 'director'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'active'])
+          && request.resource.data.role in memberRoles()
+          && request.resource.data.active is bool);
+
+      allow delete: if false; // deactivate instead; keeps history intact
+    }
+
+    // ═══════════════════════ invites/{email} ═══════════════════════
+    match /invites/{inviteId} {
+      // The invitee may read only their own invite (the app needs the role).
+      allow get: if isDirector() || (emailVerified() && inviteId == authEmail());
+      allow list: if isDirector();
+
+      allow create: if isDirector() && validInvite(inviteId);
+
+      allow update: if
+        // Director re-issues / edits an invite.
+        (isDirector() && validInvite(inviteId))
+        ||
+        // Invitee marks their own pending invite accepted — nothing else.
+        (emailVerified()
+          && inviteId == authEmail()
+          && resource.data.status == 'pending'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+          && request.resource.data.status == 'accepted');
+
+      allow delete: if isDirector();
+    }
+
+    // ═══════════════════════ projects/{projectId} ═══════════════════════
+    match /projects/{projectId} {
+      // Director sees all. Everyone else: only projects they are assigned to
+      // (memberIds) or — for sales — projects they brought in (createdBy).
+      allow get, list: if isDirector()
+        || (isActive()
+            && (request.auth.uid in resource.data.memberIds
+                || resource.data.createdBy == request.auth.uid));
+
+      // Sales may only open a new LEAD with nobody assigned (so they cannot
+      // grant other members access); the director assigns members later.
+      allow create: if request.resource.data.createdBy == request.auth.uid
+        && validStage(request.resource.data.stage)
+        && request.resource.data.memberIds is list
+        && (isDirector()
+            || (isRole('sales')
+                && request.resource.data.stage == 'lead'
+                && request.resource.data.memberIds.size() == 0));
+
+      // Only the director edits a project or moves its stage (one step forward,
+      // or back). The "all tasks of the stage are approved" gate cannot be
+      // checked by rules (no queries) — the director's UI enforces it.
+      allow update: if isDirector()
+        && validStage(request.resource.data.stage)
+        && validStageMove(resource.data.stage, request.resource.data.stage)
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['createdBy', 'createdAt']);
+      allow delete: if isDirector();
+
+      // Prices, costs, commissions, shares, client payments — director ONLY.
+      match /private/{docId} {
+        allow read: if isDirector();
+        allow delete: if isDirector();
+        allow create, update: if isDirector() && docId == 'finance' && validFinance(projectId);
+      }
+    }
+
+    // ═══════════════ projects/{id}/private/finance (director only) ═══════════════
+    function validFinance(pid) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['price', 'toolsCost', 'currency', 'commissionRate', 'salesMemberId', 'shares',
+                               'depositAmount', 'depositReceivedAt', 'amountPaidByClient', 'clientPaid',
+                               'payments', 'updatedAt'])
+        && d.keys().hasAll(['price', 'toolsCost', 'currency', 'commissionRate', 'salesMemberId', 'shares',
+                            'depositAmount', 'depositReceivedAt', 'amountPaidByClient', 'clientPaid',
+                            'payments', 'updatedAt'])
+        && money(d.price) && money(d.toolsCost) && money(d.depositAmount) && money(d.amountPaidByClient)
+        && d.currency == 'TND'
+        && d.commissionRate is number && d.commissionRate >= 0 && d.commissionRate <= 100
+        && d.salesMemberId is string
+        && (d.salesMemberId == '' || get(userDocPath(d.salesMemberId)).data.role == 'sales')
+        // shares can only be given to CURRENT members of the project
+        && d.shares is map
+        && d.shares.keys().toSet().difference(get(projectPath(pid)).data.memberIds.toSet()).size() == 0
+        && dateOrNull(d.depositReceivedAt)
+        && d.clientPaid is bool
+        && d.payments is list
+        && d.updatedAt == request.time;
+    }
+
+    // ═══════════════════════ tasks/{taskId} ═══════════════════════
+    // Status flow:
+    //   todo → in_progress → in_review            (assignee; link required)
+    //   in_review → approved | changes_requested   (director only, never own task)
+    //   changes_requested → in_progress            (assignee)
+    function validReviewEntry(e, kind) {
+      return e.keys().hasOnly(['by', 'text', 'at', 'kind'])
+        && e.keys().hasAll(['by', 'text', 'at', 'kind'])
+        && e.by == request.auth.uid
+        && e.text is string
+        && e.text.size() <= 2000
+        && e.kind == kind
+        // serverTimestamp() is not allowed inside arrays, so `at` comes from
+        // the client clock; bound it to the server time to stop back-dating.
+        && e.at is timestamp
+        && e.at > request.time - duration.value(10, 'm')
+        && e.at < request.time + duration.value(10, 'm');
+    }
+
+    function validNewTask() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['projectId', 'stage', 'title', 'instructions', 'assigneeId', 'dueDate',
+                               'status', 'deliverableUrl', 'reviewNotes', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['projectId', 'stage', 'title', 'instructions', 'assigneeId', 'dueDate',
+                            'status', 'deliverableUrl', 'reviewNotes', 'createdAt', 'updatedAt'])
+        && d.projectId is string
+        && validStage(d.stage)
+        && d.title is string && d.title.size() > 0 && d.title.size() <= 200
+        && d.instructions is string && d.instructions.size() <= 5000
+        && d.assigneeId is string
+        // the assignee must be a member of the project, and never the director
+        // (nobody may approve their own task)
+        && d.assigneeId in get(projectPath(d.projectId)).data.memberIds
+        && get(userDocPath(d.assigneeId)).data.role != 'director'
+        && dateOrNull(d.dueDate)
+        && d.status == 'todo'
+        && d.deliverableUrl == ''
+        && d.reviewNotes.size() == 0
+        && d.createdAt == request.time
+        && d.updatedAt == request.time;
+    }
+
+    // Director: edit / reassign. Cannot touch status, link, history or project.
+    function directorTaskEdit() {
+      let o = resource.data;
+      let n = request.resource.data;
+      return isDirector()
+        && n.diff(o).affectedKeys().hasOnly(['title', 'instructions', 'dueDate', 'assigneeId', 'stage', 'updatedAt'])
+        && n.updatedAt == request.time
+        && n.title is string && n.title.size() > 0 && n.title.size() <= 200
+        && n.instructions is string && n.instructions.size() <= 5000
+        && dateOrNull(n.dueDate)
+        && validStage(n.stage)
+        && (n.assigneeId == o.assigneeId
+            || (o.status in ['todo', 'in_progress', 'changes_requested']
+                && n.assigneeId in get(projectPath(o.projectId)).data.memberIds
+                && get(userDocPath(n.assigneeId)).data.role != 'director'));
+    }
+
+    // Director: approve or request changes — appends exactly one history entry.
+    function directorReview() {
+      let o = resource.data;
+      let n = request.resource.data;
+      return isDirector()
+        && o.assigneeId != request.auth.uid
+        && o.status == 'in_review'
+        && n.diff(o).affectedKeys().hasOnly(['status', 'reviewNotes', 'updatedAt'])
+        && n.updatedAt == request.time
+        && n.reviewNotes.size() == o.reviewNotes.size() + 1
+        // history is append-only: the old entries must be untouched
+        // (an empty slice [0:0] is rejected by the rules engine, so skip it)
+        && (o.reviewNotes.size() == 0 || n.reviewNotes[0:o.reviewNotes.size()] == o.reviewNotes)
+        && (
+          (n.status == 'approved'
+            && validReviewEntry(n.reviewNotes[o.reviewNotes.size()], 'approved'))
+          || (n.status == 'changes_requested'
+            && validReviewEntry(n.reviewNotes[o.reviewNotes.size()], 'changes_requested')
+            && n.reviewNotes[o.reviewNotes.size()].text.size() > 0)
+        );
+    }
+
+    // Assignee: move work along the allowed transitions and attach the link.
+    function assigneeTransition() {
+      let o = resource.data;
+      let n = request.resource.data;
+      let changed = n.diff(o).affectedKeys();
+      return isActive()
+        && o.assigneeId == request.auth.uid
+        && changed.hasOnly(['status', 'deliverableUrl', 'updatedAt'])
+        && n.updatedAt == request.time
+        && urlOrEmpty(n.deliverableUrl)
+        && (
+          (o.status == 'todo' && n.status == 'in_progress')
+          || (o.status == 'changes_requested' && n.status == 'in_progress')
+          || (o.status == 'in_progress' && n.status == 'in_review' && validUrl(n.deliverableUrl))
+          // just (re)saving the link, status unchanged — not while under review/approved
+          || (o.status in ['todo', 'in_progress', 'changes_requested'] && n.status == o.status)
+        );
+    }
+
+    match /tasks/{taskId} {
+      // Director sees all; everyone else only tasks assigned to them.
+      allow get, list: if isDirector()
+        || (isActive() && resource.data.assigneeId == request.auth.uid);
+
+      allow create: if isDirector() && validNewTask();
+      allow update: if directorTaskEdit() || directorReview() || assigneeTransition();
+      allow delete: if isDirector();
+    }
+
+    // ═══════════════════════ prospects/{prospectId} ═══════════════════════
+    // director: everything · sales: create, and read/edit ONLY prospects assigned
+    // to them (cannot reassign or delete) · crew roles: no access.
+    function prospectPath(id) {
+      return /databases/$(database)/documents/prospects/$(id);
+    }
+
+    // '' = unassigned, otherwise it must be a sales member.
+    function assigneeOk(a) {
+      return a is string && (a == '' || get(userDocPath(a)).data.role == 'sales');
+    }
+
+    function validProspect() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['name', 'city', 'sector', 'pageUrl', 'followers', 'lastPost', 'runningAds',
+                               'quality', 'notes', 'outreachStatus', 'nextFollowUp', 'assigneeId',
+                               'lostReason', 'projectId', 'createdBy', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['name', 'city', 'sector', 'pageUrl', 'followers', 'lastPost', 'runningAds',
+                            'quality', 'notes', 'outreachStatus', 'nextFollowUp', 'assigneeId',
+                            'lostReason', 'projectId', 'createdBy', 'createdAt', 'updatedAt'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 200
+        && d.city is string && d.city.size() <= 100
+        && d.sector is string && d.sector.size() <= 100
+        && urlOrEmpty(d.pageUrl)
+        && d.followers is int && d.followers >= 0 && d.followers <= 1000000000
+        && d.lastPost in ['', 'this_week', 'this_month', '1_3_months', 'older', 'no_page']
+        && d.runningAds in ['yes', 'no', 'unclear']
+        && (d.quality == null || d.quality in [1, 2, 3])
+        && d.notes is string && d.notes.size() <= 5000
+        && d.outreachStatus in ['not_contacted', 'contacted', 'follow_up', 'meeting', 'won', 'lost']
+        && dateOrNull(d.nextFollowUp)
+        && d.assigneeId is string
+        && d.lostReason is string && d.lostReason.size() <= 500
+        // a lost prospect must say why
+        && (d.outreachStatus != 'lost' || d.lostReason.size() > 0)
+        && d.projectId is string
+        && d.createdBy is string
+        && d.updatedAt == request.time;
+    }
+
+    match /prospects/{prospectId} {
+      allow get, list: if isDirector()
+        || (isRole('sales') && resource.data.assigneeId == request.auth.uid);
+
+      allow create: if validProspect()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && (
+          (isDirector() && assigneeOk(request.resource.data.assigneeId))
+          // sales can only create prospects for themselves
+          || (isRole('sales')
+              && request.resource.data.assigneeId == request.auth.uid
+              && request.resource.data.projectId == '')
+        );
+
+      allow update: if validProspect()
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['createdBy', 'createdAt'])
+        && (
+          (isDirector() && assigneeOk(request.resource.data.assigneeId))
+          || (isRole('sales')
+              && resource.data.assigneeId == request.auth.uid
+              // cannot reassign (not even to themselves from someone else's)
+              && request.resource.data.assigneeId == resource.data.assigneeId
+              // won / lost are final for sales
+              && (!(resource.data.outreachStatus in ['won', 'lost'])
+                  || request.resource.data.outreachStatus == resource.data.outreachStatus))
+        );
+
+      allow delete: if isDirector();
+
+      // Outreach log — append-only, visible to whoever can see the prospect.
+      match /activities/{activityId} {
+        function canSeeProspect() {
+          return isDirector()
+            || (isRole('sales') && get(prospectPath(prospectId)).data.assigneeId == request.auth.uid);
+        }
+
+        allow get, list: if canSeeProspect();
+
+        allow create: if canSeeProspect()
+          && request.resource.data.keys().hasOnly(['type', 'channel', 'text', 'createdBy', 'createdAt'])
+          && request.resource.data.keys().hasAll(['type', 'channel', 'text', 'createdBy', 'createdAt'])
+          && request.resource.data.type in ['message', 'call', 'visit', 'meeting', 'note']
+          && request.resource.data.channel in ['facebook', 'instagram', 'whatsapp', 'phone', 'in_person']
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 2000
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.createdAt == request.time;
+
+        allow update: if false;
+        allow delete: if isDirector();
+      }
+    }
+
+    // ═══════════════════════ templates/{templateId} ═══════════════════════
+    // Outreach message templates: director writes, director + sales read.
+    function validTemplate() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['title', 'body', 'createdBy', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['title', 'body', 'createdBy', 'createdAt', 'updatedAt'])
+        && d.title is string && d.title.size() > 0 && d.title.size() <= 100
+        && d.body is string && d.body.size() > 0 && d.body.size() <= 3000
+        && d.createdBy is string
+        && d.updatedAt == request.time;
+    }
+
+    match /templates/{templateId} {
+      allow get, list: if isDirectorOrSales();
+      allow create: if isDirector() && validTemplate()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update: if isDirector() && validTemplate()
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['createdBy', 'createdAt']);
+      allow delete: if isDirector();
+    }
+
+    // Director-only marker so the two default templates are seeded just once.
+    match /settings/seed {
+      allow read, write: if isDirector();
+    }
+
+    // ═══════════════════════ settings/finance (director only) ═══════════════════════
+    match /settings/finance {
+      allow read: if isDirector();
+      allow create, update: if isDirector()
+        && request.resource.data.keys().hasOnly(['defaultCommissionRate', 'minProjectPrice', 'paymentDelayDays', 'updatedAt'])
+        && request.resource.data.keys().hasAll(['defaultCommissionRate', 'minProjectPrice', 'paymentDelayDays', 'updatedAt'])
+        && request.resource.data.defaultCommissionRate is number
+        && request.resource.data.defaultCommissionRate >= 0 && request.resource.data.defaultCommissionRate <= 100
+        && money(request.resource.data.minProjectPrice)
+        && request.resource.data.paymentDelayDays is int
+        && request.resource.data.paymentDelayDays >= 0 && request.resource.data.paymentDelayDays <= 365
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    // ═══════════════════════ payouts/{payoutId} ═══════════════════════
+    // id == "<projectId>_<memberId>_<type>" so creating twice can never duplicate.
+    // Flow: awaiting_client_payment → ready (client paid IN FULL) → paid.
+    // Only the director writes; a member can only read their OWN payouts.
+    function validPayoutShape() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['projectId', 'projectTitle', 'memberId', 'amount', 'type', 'status', 'method',
+                               'createdAt', 'paidAt', 'dueAt', 'updatedAt'])
+        && d.keys().hasAll(['projectId', 'projectTitle', 'memberId', 'amount', 'type', 'status', 'method',
+                            'createdAt', 'paidAt', 'dueAt', 'updatedAt'])
+        && d.projectId is string
+        && d.projectTitle is string && d.projectTitle.size() <= 200
+        && d.memberId is string
+        && money(d.amount)
+        && d.type in ['fee', 'commission']
+        && d.status in ['awaiting_client_payment', 'ready', 'paid']
+        && d.method is string && d.method.size() <= 100
+        && dateOrNull(d.paidAt)
+        && dateOrNull(d.dueAt)
+        && d.updatedAt == request.time;
+    }
+
+    match /payouts/{payoutId} {
+      allow get, list: if isDirector()
+        || (isActive() && resource.data.memberId == request.auth.uid);
+
+      allow create: if isDirector()
+        && validPayoutShape()
+        && payoutId == request.resource.data.projectId + '_' + request.resource.data.memberId + '_' + request.resource.data.type
+        && get(userDocPath(request.resource.data.memberId)).data.role != 'director'
+        && request.resource.data.status == 'awaiting_client_payment'
+        && request.resource.data.paidAt == null
+        && request.resource.data.dueAt == null
+        && request.resource.data.method == ''
+        && request.resource.data.createdAt == request.time;
+
+      allow update: if isDirector()
+        && validPayoutShape()
+        && resource.data.status != 'paid' // a paid payout is final
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['projectId', 'memberId', 'type', 'createdAt'])
+        && (
+          // re-running "create payouts": amounts / title only, same status
+          (request.resource.data.status == resource.data.status
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['amount', 'projectTitle', 'updatedAt']))
+          // client has paid in full → ready, with a due date
+          || (resource.data.status == 'awaiting_client_payment'
+            && request.resource.data.status == 'ready'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'dueAt', 'updatedAt'])
+            && request.resource.data.dueAt is timestamp
+            && get(financePath(resource.data.projectId)).data.price > 0
+            && get(financePath(resource.data.projectId)).data.amountPaidByClient >= get(financePath(resource.data.projectId)).data.price)
+          // paid, with the time and an optional method note ("نقداً", "D17"…)
+          || (resource.data.status == 'ready'
+            && request.resource.data.status == 'paid'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'paidAt', 'method', 'updatedAt'])
+            && request.resource.data.paidAt == request.time)
+        );
+
+      allow delete: if isDirector() && resource.data.status != 'paid';
+    }
+
+    // ═══════════════════════ notifications/{id} ═══════════════════════
+    // Created client-side, so creation is tied to a real task in the SAME
+    // batch (getAfter) — nobody can send arbitrary notifications to anyone.
+    function validTaskNotification() {
+      let n = request.resource.data;
+      let t = getAfter(taskPath(n.taskId)).data;
+      return n.keys().hasOnly(['userId', 'type', 'projectId', 'taskId', 'text', 'read', 'createdAt'])
+        && n.keys().hasAll(['userId', 'type', 'projectId', 'taskId', 'text', 'read', 'createdAt'])
+        && n.userId is string
+        && n.text is string && n.text.size() > 0 && n.text.size() <= 300
+        && n.read == false
+        && n.createdAt == request.time
+        && existsAfter(taskPath(n.taskId))
+        && t.projectId == n.projectId
+        && (
+          // director → the assignee
+          (isDirector()
+            && t.assigneeId == n.userId
+            && (n.type == 'task_assigned'
+                || (n.type == 'task_approved' && t.status == 'approved')
+                || (n.type == 'changes_requested' && t.status == 'changes_requested')))
+          ||
+          // assignee → the director, when they submit their own task for review
+          (n.type == 'task_submitted'
+            && t.assigneeId == request.auth.uid
+            && t.status == 'in_review'
+            && get(userDocPath(n.userId)).data.role == 'director')
+        );
+    }
+
+    // Payout notifications: director → the payout's own member, tied to the payout
+    // in the same batch. The text carries only THAT member's amount.
+    function validPayoutNotification() {
+      let n = request.resource.data;
+      let po = getAfter(payoutPath(n.payoutId)).data;
+      return isDirector()
+        && n.keys().hasOnly(['userId', 'type', 'projectId', 'taskId', 'payoutId', 'text', 'read', 'createdAt'])
+        && n.keys().hasAll(['userId', 'type', 'projectId', 'taskId', 'payoutId', 'text', 'read', 'createdAt'])
+        && n.taskId == ''
+        && n.payoutId is string && n.payoutId.size() > 0
+        && n.userId is string
+        && n.text is string && n.text.size() > 0 && n.text.size() <= 300
+        && n.read == false
+        && n.createdAt == request.time
+        && existsAfter(payoutPath(n.payoutId))
+        && po.memberId == n.userId
+        && po.projectId == n.projectId
+        && ((n.type == 'payout_ready' && po.status == 'ready')
+            || (n.type == 'payout_paid' && po.status == 'paid'));
+    }
+
+    match /notifications/{notificationId} {
+      allow get, list: if isActive() && resource.data.userId == request.auth.uid;
+      allow create: if isActive()
+        && ((request.resource.data.type in ['payout_ready', 'payout_paid'] && validPayoutNotification())
+            || (!(request.resource.data.type in ['payout_ready', 'payout_paid']) && validTaskNotification()));
+      // The owner may only flip `read`.
+      allow update: if isActive()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+        && request.resource.data.read is bool;
+      allow delete: if false;
+    }
+
+    // Director-only collection-group read, so the dashboard can load every project's finance at once.
+    match /{path=**}/private/{docId} {
+      allow read: if isDirector();
+    }
+
+    // Everything else: denied.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "dragonvision-hub",
+  "version": "0.1.0",
+  "description": "DragonVision Hub — internal team management app",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "emulators": "firebase emulators:start --only auth,firestore --project demo-dragonvision-hub",
+    "dev:emu": "firebase emulators:exec --only auth,firestore --ui --project demo-dragonvision-hub \"vite --mode emulator\"",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-dragonvision-hub \"vitest run --config vitest.config.ts\""
+  },
+  "dependencies": {
+    "@fontsource-variable/cairo": "^5.3.0",
+    "firebase": "^12.19.0",
+    "lucide-react": "^1.73.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.5"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "firebase-tools": "^15.36.0",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vite-plugin-pwa": "^2.0.0",
+    "vitest": "^5.1.0"
+  },
+  "private": true,
+  "type": "module"
+}

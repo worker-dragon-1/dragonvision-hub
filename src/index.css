@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Cairo Variable", "Tajawal", ui-sans-serif, system-ui, sans-serif;
+
+  /* Dark surfaces */
+  --color-ink: #0b0b0e; /* page background */
+  --color-surface: #141418; /* cards, sidebar */
+  --color-surface-2: #1c1c22; /* inputs, hover */
+  --color-line: #2c2c35; /* borders */
+
+  /* Text */
+  --color-fg: #f4f4f6;
+  --color-muted: #a8a8b4; /* ≥ 7:1 on surface */
+
+  /* Brand — crimson */
+  --color-crimson: #c8102e; /* fills (white text on it = 5.9:1) */
+  --color-crimson-600: #a80d26; /* hover/pressed fills */
+  --color-crimson-text: #f2546b; /* crimson used AS text on dark (5.5:1) */
+
+  /* Status */
+  --color-ok: #4ade80;
+  --color-warn: #fbbf24;
+}
+
+@utility btn {
+  @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 text-[0.95rem] font-semibold
+    transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-ink text-fg font-sans antialiased;
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-crimson-text);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--color-crimson) 55%, transparent);
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-surface;
+  }
+
+  .btn-primary {
+    @apply btn bg-crimson text-white hover:bg-crimson-600 active:bg-crimson-600;
+  }
+  .btn-ghost {
+    @apply btn border border-line bg-surface-2 text-fg hover:border-muted/50;
+  }
+  .btn-danger {
+    @apply btn border border-crimson/40 bg-transparent text-crimson-text hover:bg-crimson/10;
+  }
+
+  /* 16px text prevents iOS Safari from zooming into inputs */
+  .input {
+    @apply block h-11 w-full rounded-xl border border-line bg-surface-2 px-3.5 text-base text-fg
+      placeholder:text-muted/70 transition-colors focus:border-crimson-text focus:outline-none
+      disabled:opacity-50;
+  }
+  /* Latin-script fields (email, password): keep LTR so @ . and digits render correctly */
+  .input-ltr {
+    direction: ltr;
+    text-align: left;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-muted;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-semibold;
+  }
+}
