@@ -54,7 +54,7 @@ export function UpdateBanner() {
       role="status"
       aria-live="polite"
       data-testid="update-banner"
-      className="fixed inset-x-3 bottom-[calc(5rem+env(safe-area-inset-bottom))] z-[70] md:inset-x-auto md:bottom-5 md:end-5 md:w-96"
+      className="no-print fixed inset-x-3 bottom-[calc(5rem+env(safe-area-inset-bottom))] z-[70] md:inset-x-auto md:bottom-5 md:end-5 md:w-96"
     >
       <div className="flex items-center gap-3 rounded-2xl border border-crimson/50 bg-surface p-3.5 ps-4 shadow-2xl shadow-black/60">
         <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-crimson/15 text-crimson-text">

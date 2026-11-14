@@ -55,6 +55,12 @@ export const COL = {
   activities: "activities",
   templates: "templates",
   settings: "settings",
+  /** subcollection of projects/{id} — one doc per quote version ("1", "2", …) */
+  quoteVersions: "quoteVersions",
+  /** client portals — the doc id is the secret link token */
+  portals: "portals",
+  /** subcollection of portals/{token} — the client's answers */
+  responses: "responses",
 } as const;
 
 /** users/{uid} — uid is the Firebase Auth uid. */
@@ -87,9 +93,28 @@ export interface ProjectDoc {
   memberIds: string[];
   /** set when the project is moved to "delivered" (used by the dashboard) */
   deliveredAt?: Timestamp;
+  /** director overrides of the client-approval gates, with the reason */
+  gateOverrides?: GateOverride[];
   createdBy: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+}
+
+export interface GateOverride {
+  from: Stage;
+  to: Stage;
+  reason: string;
+  by: string; // director uid
+  at: Timestamp;
+}
+
+/** A paid revision round beyond those included in the quote. */
+export interface ExtraRevision {
+  responseId: string; // the client's change request it comes from
+  round: number; // 3 = the third round
+  fee: number; // e.g. 50 TND
+  toolsCost: number; // actual tool cost of that round (entered by the director)
+  at: Timestamp;
 }
 
 /** One client payment. Appended automatically whenever amountPaidByClient changes (negative = correction). */
@@ -111,6 +136,8 @@ export interface ProjectFinanceDoc {
   amountPaidByClient: number; // total received so far (includes the deposit)
   clientPaid: boolean; // derived: amountPaidByClient >= price
   payments: ClientPayment[];
+  /** paid revision rounds (client pays fee + tool cost) — optional for older docs */
+  extraRevisions?: ExtraRevision[];
   updatedAt: Timestamp;
 }
 
@@ -119,6 +146,94 @@ export interface FinanceSettings {
   defaultCommissionRate: number; // percent
   minProjectPrice: number;
   paymentDelayDays: number; // payout due this many days after the client paid
+  // quote & agreement defaults
+  includedRevisions: number; // revision rounds included per project
+  extraRevisionPrice: number; // TND per extra round (+ that round's tool cost)
+  depositPercent: number; // deposit = % of the price, required before production
+  confidentialityPrice: number; // extra for NOT showing the video in our portfolio
+  quoteValidityDays: number;
+}
+
+// ── Quotes & client portal ─────────────────────────────────────────────────
+export const REVIEW_ITEMS = ["quote", "script", "storyboard", "final"] as const;
+export type ReviewItem = (typeof REVIEW_ITEMS)[number];
+export type CountedItem = "final" | "storyboard";
+
+export interface Deliverable {
+  title: string;
+  durationSec: number;
+  formats: string[]; // "9:16" | "1:1" | "16:9"
+  language: string; // e.g. "الدارجة التونسية"
+}
+
+export type QuoteStatus = "draft" | "sent" | "accepted" | "superseded";
+
+/** projects/{projectId}/quoteVersions/{version} — DIRECTOR ONLY. */
+export interface QuoteVersionDoc {
+  version: number;
+  status: QuoteStatus;
+  deliverables: Deliverable[];
+  price: number; // without the confidentiality option
+  depositAmount: number;
+  deliveryDate: Timestamp | null;
+  revisionsIncluded: number;
+  extraRevisionPrice: number;
+  confidential: boolean; // client pays to keep the video out of our portfolio
+  confidentialityPrice: number;
+  paymentTerms: string;
+  validUntil: Timestamp;
+  acceptedAt: Timestamp | null;
+  acceptedBy: string; // client's typed name (or "" until accepted)
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+/** The client-safe copy of a quote stored inside a portal. */
+export type PortalQuote = Pick<
+  QuoteVersionDoc,
+  | "version" | "deliverables" | "price" | "depositAmount" | "deliveryDate" | "revisionsIncluded"
+  | "extraRevisionPrice" | "confidential" | "confidentialityPrice" | "paymentTerms" | "validUntil"
+>;
+
+export interface PortalItem {
+  version: number;
+  open: boolean; // waiting for the client's answer
+  title: string;
+  note: string; // a note FOR THE CLIENT
+  link: string; // Drive / video link
+  text: string; // e.g. the script text
+  publishedAt: Timestamp;
+  /** the client's answer, copied in when a link is regenerated (answers stay under the old link) */
+  answer?: Pick<ClientResponseDoc, "decision" | "name" | "comment" | "createdAt">;
+}
+
+/** portals/{token} — only client-safe data. Anonymous clients can only get it by its exact token. */
+export interface PortalDoc {
+  projectId: string;
+  projectTitle: string;
+  clientName: string;
+  revoked: boolean;
+  revokedAt: Timestamp | null;
+  quote: PortalQuote | null;
+  items: Partial<Record<ReviewItem, PortalItem>>;
+  revisionsIncluded: number;
+  revisionsUsed: number; // synced by the director when publishing
+  extraRevisionPrice: number;
+  countedItems: CountedItem[];
+  responsesSeenAt: Timestamp | null; // director "read" marker
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+/** portals/{token}/responses/{item}_v{version} — create-only, written by the anonymous client. */
+export interface ClientResponseDoc {
+  item: ReviewItem;
+  version: number;
+  decision: "approved" | "changes_requested";
+  name: string; // typed full name = signature
+  comment: string;
+  extraRoundAck: boolean; // acknowledged a paid revision round
+  createdAt: Timestamp;
 }
 
 /** One entry of a task's review history. */

@@ -82,6 +82,23 @@ Exactly five roles. **Enforced in `firestore.rules`**; the UI only hides what th
 | Read the team directory (names, emails, roles) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Change own role / `active` flag | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Change own display name | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create / edit / accept quotes (`projects/*/quoteVersions`) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Create / edit / revoke / regenerate client portal links, read **all** client responses | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Read a portal or a client response | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Answer in the client portal (approve / request changes) | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+**The client (not signed in, holding a portal link)** — the only outsider who ever touches the system:
+
+| Capability | client (anonymous) |
+|---|:-:|
+| `get` **one** portal doc by its exact token id, only while it is not revoked | ✅ |
+| `list` / query the `portals` collection (enumerate links) | ❌ |
+| Update or delete a portal | ❌ |
+| Create **one** response per open item version (strict shape, see §5) | ✅ |
+| Update / delete a response | ❌ |
+| Read anything else — users, invites, projects, finance, tasks, prospects, templates, payouts, notifications, settings, quotes | ❌ |
+
+Signed-in team members (the director included) **cannot** write client responses: an approval must come from the link, not from someone on the team.
 
 Navigation per role (labels exactly as specified):
 
@@ -98,6 +115,9 @@ Design decisions worth knowing:
 * **Deactivation is immediate.** Every rule re-reads `users/{uid}.active` on each request. A deactivated member can read only their *own* profile doc (so the app can say "your account is deactivated") and nothing else.
 * **Team directory.** Any active member can read `users` (display name, email, role). Remove this in `firestore.rules` if you want members to see only themselves.
 * **Email must be verified.** Profile creation requires `email_verified == true`; otherwise anyone could register with the director's or an invitee's address via email/password. Google accounts are verified automatically; email/password users confirm through a link (the app guides them).
+* **Client gates.** On top of the task gate, two stage moves need the client: `script → generation` needs the client's approval of the **current** script version
+  *and* a received deposit (`depositReceivedAt` or payments ≥ deposit); `review → delivered` needs the client's approval of the **current** final video. The project page shows a clear Arabic message;
+  the director can override with a **recorded reason** (`gateOverrides`). Like the task gate, this lives in the director's UI (rules can't query responses).
 * **No emails are sent.** Sending invitation emails needs a backend (Cloud Functions → Blaze plan). Instead the Team page has a *نسخ الدعوة* button that copies a ready-to-paste message (WhatsApp-friendly) with the app link.
 
 ### Money display (RTL)
@@ -107,8 +127,8 @@ and a no-break space joins it to the currency. The test run measures real glyph 
 The invisible characters are built with `String.fromCharCode` in the source on purpose.
 
 ### Dashboard (لوحة المخرج)
-Cards link to filtered pages (`/review`, `/tasks?filter=overdue`, `/prospects?due=1`, `/payouts?status=ready`). *Money this month*: revenue = client payments **received this month** (from `payments`),
-outstanding = Σ max(0, price − paid), payouts paid this month, margin of projects delivered this month. *Team performance* (last 30 days, per member): tasks approved, % approved on/before `dueDate`,
+Cards link to filtered pages (`/review`, `/tasks?filter=overdue`, `/prospects?due=1`, `/payouts?status=ready`, and «ردود الزبائن» → `/responses`: client answers not yet seen). *Money this month*: revenue = client payments **received this month** (from `payments`),
+outstanding = Σ max(0, price + paid extra rounds − paid), payouts paid this month, margin of projects delivered this month. *Team performance* (last 30 days, per member): tasks approved, % approved on/before `dueDate`,
 average `changes_requested` rounds per completed task, tasks overdue now — delivered work, not activity.
 
 ## 4. Onboarding flow
@@ -156,6 +176,7 @@ Timestamps are Firestore `Timestamp`s. `createdAt` is always set with `serverTim
 | `dueDate` | timestamp \| null | |
 | `driveFolderUrl` | string | Google Drive folder link |
 | `memberIds` | string[] | uids with access to this project |
+| `gateOverrides` | `{ from, to, reason, by, at }[]` (optional) | director overrides of a client gate, with the reason (append-only in the UI) |
 | `deliveredAt` | timestamp (optional) | set when moved to `delivered`; the dashboard counts the margin in that month |
 | `createdBy` | string | uid (for sales: "brought in by") |
 | `createdAt`, `updatedAt` | timestamp | |
@@ -172,11 +193,12 @@ Amounts are plain numbers **in dinars** (up to 3 decimals). The rules accept wri
 | `depositAmount` | number | agreed/received deposit (informational) |
 | `depositReceivedAt` | timestamp \| null | |
 | `amountPaidByClient` | number | **total** received so far, deposit included |
-| `clientPaid` | boolean | derived on save: `amountPaidByClient ≥ price` |
+| `clientPaid` | boolean | derived on save: `amountPaidByClient ≥ price + Σ extra rounds` |
+| `extraRevisions` | `{ responseId, round, fee, toolsCost, at }[]` (optional, ≤ 100) | paid revision rounds beyond the included ones; added from the client page (fee + the actual tool cost the director enters) |
 | `payments` | `{ amount, at }[]` | appended automatically whenever `amountPaidByClient` changes (negative = correction) — lets the dashboard know what arrived *this month* |
 | `updatedAt` | timestamp | |
 
-Derived (never stored): **director margin = price − toolsCost − Σ shares**. Client status: unpaid / partial / paid.
+Derived (never stored): **total due = price + Σ (fee + toolsCost) of extra rounds**; **director margin = total due − toolsCost − extra rounds' tool costs − Σ shares**. Client status: unpaid / partial / paid.
 
 > **Commissions are disabled (business decision).** The UI shows no commission fields, lines or wording, finance docs are always saved with `commissionRate: 0` and `salesMemberId: ""`
 > (so they stay valid for the unchanged `firestore.rules`), and **no `commission` payouts are ever created**. To pay someone on a project — the sales member included — add them as a
@@ -189,6 +211,13 @@ The UI *warns* (never blocks) when the price is below `minProjectPrice`, or the 
 | `defaultCommissionRate` | number | not editable any more (commissions off); kept unchanged because the rules require the field |
 | `minProjectPrice` | number | default **500** (dinars) |
 | `paymentDelayDays` | integer | default **3**: a payout becomes due this many days after it turns `ready` |
+| `includedRevisions` | integer (optional) | default **2** revision rounds included in a quote |
+| `extraRevisionPrice` | number (optional) | default **50** dinars per extra round (+ the actual tool cost of that round) |
+| `depositPercent` | number (optional) | default **30** % — the deposit suggested in a quote; required before production |
+| `confidentialityPrice` | number (optional) | default **100** dinars — by default DragonVision may show the video in its portfolio |
+| `quoteValidityDays` | integer (optional) | default **15** days |
+
+The five new fields are optional in the rules so an older app build and the new rules work together during a deploy.
 
 If the doc doesn't exist the app uses those defaults. `settings/seed` (the template-seed marker) is also director-only.
 
@@ -299,10 +328,63 @@ awaiting_client_payment ──▶ ready ──▶ paid
 `ready` is only accepted by the rules if the client paid **in full** (the rule reads the finance doc). A `paid` payout is final.
 Re-running "create payouts" updates amounts of unpaid payouts, removes unpaid ones whose share disappeared, never touches paid ones, and reports what changed.
 
+### `projects/{projectId}/quoteVersions/{version}`  — **director only**
+One quote per project, with versions (doc id = the version number as a string).
+| Field | Type | Notes |
+|---|---|---|
+| `version` | integer | equals the doc id |
+| `status` | `draft` \| `sent` \| `accepted` \| `superseded` | flow below |
+| `deliverables` | `{ title, durationSec, formats: ("9:16"\|"1:1"\|"16:9")[], language }[]` | 1–20 |
+| `price`, `depositAmount` | number | dinars |
+| `deliveryDate` | timestamp \| null | |
+| `revisionsIncluded`, `extraRevisionPrice` | integer, number | from settings by default |
+| `confidential`, `confidentialityPrice` | boolean, number | the total adds the price only when `confidential` |
+| `paymentTerms` | string | ≤ 2000 chars |
+| `validUntil` | timestamp | today + `quoteValidityDays` |
+| `acceptedAt`, `acceptedBy` | timestamp \| null, string | set when the director confirms the client's acceptance |
+| `createdAt`, `updatedAt` | timestamp | |
+
+`draft → sent` (published to the portal; the content is then **locked**) `→ accepted` (director confirms; the finance price = quote total and the deposit are filled) `→ superseded`.
+A change after sending needs a **new version** (copied from the latest), which must be accepted again. Only drafts can be deleted. Printable page: `/projects/{id}/quote/print/{version}` (white A4, *طباعة / حفظ PDF*).
+
+### `portals/{token}`  — the client link
+`token` = 40 random base-62 characters from `crypto.getRandomValues` (≈ 238 bits; the rules require 32–64 alphanumerics). The link is `https://<site>/p/<token>`.
+The document holds **only client-safe data** — never team members, tasks, internal notes, finance, payouts, other projects or prospects:
+| Field | Type | Notes |
+|---|---|---|
+| `projectId`, `projectTitle`, `clientName` | string | `projectId` is immutable |
+| `revoked`, `revokedAt` | boolean, timestamp \| null | a revoked link shows «هذا الرابط لم يعد صالحاً» |
+| `quote` | client-safe copy of the published quote \| null | |
+| `items` | map `quote` \| `script` \| `storyboard` \| `final` → `{ version, open, title, note, link, text, publishedAt, answer? }` | one open version per item; publishing a new version closes the previous one. `answer` is copied when a link is regenerated |
+| `revisionsIncluded`, `revisionsUsed`, `extraRevisionPrice` | number | shown to the client as «جولات التعديل: x / y» |
+| `countedItems` | (`final` \| `storyboard`)[] | which items' change requests count as a round (final always; storyboard optional) |
+| `responsesSeenAt` | timestamp \| null | for the «ردود الزبائن» counter |
+| `createdAt`, `updatedAt` | timestamp | |
+
+*رابط جديد* creates a new token with the same state and revokes the old one.
+
+### `portals/{token}/responses/{item}_v{version}`  — create-only, by the anonymous client
+| Field | Type | Notes |
+|---|---|---|
+| `item` | `quote` \| `script` \| `storyboard` \| `final` | |
+| `version` | integer 1–1000 | the id is `${item}_v${version}` → **one answer per version** |
+| `decision` | `approved` \| `changes_requested` | |
+| `name` | string 2–80 | the client's full name (typed to approve) |
+| `comment` | string ≤ 2000 | required (≥ 3 chars) for `changes_requested` |
+| `extraRoundAck` | boolean | must be `true` when the change request is a **paid** round |
+| `createdAt` | timestamp | `== request.time` |
+
+Accepted only when the portal is not revoked and that item + version is **currently open** in the portal document.
+
+**Revision rounds.** Each change request on the final video (and the storyboard, if the director ticks it) is one round. Beyond `revisionsIncluded`: the director is warned, the client
+sees *«هذه جولة تعديل مدفوعة»* with the price **before** sending (and must tick the agreement — the rules check `extraRoundAck`), and the director adds the round to the finance
+(*إضافة إلى المالية*: fee + actual tool cost), where it shows as «تعديلات إضافية مدفوعة» in the breakdown.
+
 ### Query note
 Rules cannot filter, so clients must query within what they may read:
 members query tasks with `where("assigneeId", "==", uid)`, projects with `where("memberIds", "array-contains", uid)`,
 payouts with `where("memberId", "==", uid)`. An unconstrained list query by a non-director is denied.
+The client portal reads its portal doc and each response **by exact id** (no queries).
 
 ## 6. Testing
 
@@ -324,6 +406,11 @@ payouts with `where("memberId", "==", uid)`. An unconstrained list query by a no
   14. only the director can write templates
   15. a non-director cannot create, update or delete any payout (including their own status) — and the director is held to the id / status-flow rules
   16. a non-director cannot read or write `settings/finance`
+  17. an unauthenticated user cannot list portals and can `get` one only by its exact id
+  18. an unauthenticated user cannot update or delete a portal
+  19. a client response is rejected when the item/version isn't open, the portal is revoked, or the shape / size is invalid (and a paid round needs `extraRoundAck`)
+  20. an unauthenticated user cannot read any project, task, finance, payout, prospect or user
+  21. a non-director member cannot read portals or responses
   (test 3 also covers: a member can read only their own payouts, by id and by an own-only query; unfiltered list denied)
 * **Finance flow check** (not committed): director opens a project with an editor and a sales member → fills finance (800 / tools 150 / editor share 120) → checks the breakdown
   (434, 54.3 %) and the warnings → creates payouts, runs it again (no duplicates, "no changes"), changes and restores a share → records the client paying partially then in full → payouts become ready →
@@ -332,6 +419,10 @@ payouts with `where("memberId", "==", uid)`. An unconstrained list query by a no
 * **Prospects flow check** (not committed): director invites a sales member → the sales user pastes an import of 3 rows (1 malformed, 1 duplicate), checks the preview and imports →
   opens a prospect, logs a message with a follow-up for today → sees it in *متابعات اليوم* → copies a template with placeholders filled (and the select-text fallback when the clipboard refuses) →
   marks the prospect won → creates the lead project → the director sees it on the board. Also: an editor has no prospects navigation, is redirected, and is denied by the rules (REST calls return 403).
+* **Client portal flow check** (not committed): director creates and prints a quote → creates the portal link → the client (fresh browser, not signed in) accepts → the director confirms
+  (finance price + deposit filled) → script v1 with changes, v2 approved (the script gate and the deposit gate are checked) → final video with 3 change requests (the 3rd shows the paid
+  warning first, needs the agreement and is added to the finance) → approve → delivered. Also: regenerate / revoke the link, a member is denied, and the client's page **and every
+  network response** is scanned for internal names, tasks, notes, emails and finance numbers (none).
 * **Workflow flow check** (not committed): with the emulators and Playwright — director creates a project with an editor, creates and assigns tasks,
   the editor sees them + the notification, submits Drive links, the director requests changes with a note, the editor resubmits, the director approves,
   and the project advances (and is blocked while a task isn't approved). Also covers reassign/delete, the members editor and a sales user opening a lead.
@@ -370,6 +461,14 @@ src/components/TaskViews   task card, task detail (status buttons, review histor
 src/context/DataContext    role-scoped realtime listeners (matches the rules)
 src/lib/workflow.ts        stage order, stage gate, allowed transitions
 src/lib/actions.ts         every workflow write (task + notification in one batch)
+src/pages/QuotePage.tsx    quote versions: draft editor, summary, publish to portal, confirm acceptance
+src/pages/QuotePrint.tsx   printable Arabic quote (white A4) + src/components/QuoteDocument
+src/pages/ClientPage.tsx   portal link (copy / WhatsApp / revoke / regenerate), revision rounds, publish items, responses
+src/pages/ResponsesPage    ردود الزبائن across projects
+src/pages/PortalPage.tsx   the public client portal /p/<token> (no login)
+src/lib/portal.ts          token, WhatsApp text, client-safe quote copy, revision rounds, client gates
+src/lib/clientActions.ts   quote / portal / response / paid-round / gate-override writes
+src/hooks/useProjectClient quote versions + a project's portal state and responses
 tests/                     Firestore rules tests
 ```
 
@@ -404,6 +503,8 @@ Do **not** set `VITE_USE_EMULATORS`. Vite bakes these in at build time, so redep
 1. Publish `firestore.rules` (Firebase console → Firestore → Rules, or `npx firebase deploy --only firestore:rules`). **Required for every feature to work.**
 2. Authentication → Sign-in method: enable Email/Password and Google. Authentication → Settings → Authorized domains: add the Netlify domain.
 3. No Firestore indexes are needed.
+4. **Client portal:** publish the new rules right after Netlify deploys this version — until then quote and portal writes fail (the old app keeps working with the new rules).
+   Open client links in a browser where you are **not** signed in to test them; signed in, the director sees a read-only preview.
 
 ### GitHub
 The repository is meant to be **private**. Never commit `.env` (it is git-ignored). `.env.emulator` is committed on purpose: it holds only demo keys and the director email.

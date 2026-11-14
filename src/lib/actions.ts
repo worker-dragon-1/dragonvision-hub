@@ -334,11 +334,14 @@ export async function saveFinance(projectId: string, input: FinanceInput, previo
   const prevPaid = previous?.amountPaidByClient ?? 0;
   const delta = Math.round((input.amountPaidByClient - prevPaid) * 1000) / 1000;
   const payments: ClientPayment[] = [...(previous?.payments ?? []), ...(delta !== 0 ? [{ amount: delta, at: Timestamp.now() }] : [])];
+  const extraRevisions = previous?.extraRevisions ?? [];
+  const due = input.price + extraRevisions.reduce((n, x) => n + x.fee + x.toolsCost, 0);
   await setDoc(doc(db, COL.projects, projectId, COL.private, "finance"), {
     ...input,
     currency: "TND",
-    clientPaid: clientStatus(input.price, input.amountPaidByClient) === "paid",
+    clientPaid: clientStatus(due, input.amountPaidByClient) === "paid",
     payments,
+    extraRevisions,
     updatedAt: serverTimestamp(),
   });
 }

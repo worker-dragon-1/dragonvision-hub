@@ -103,6 +103,15 @@ service cloud.firestore {
       return /databases/$(database)/documents/projects/$(pid)/private/finance;
     }
 
+    function portalPath(token) {
+      return /databases/$(database)/documents/portals/$(token);
+    }
+
+    // Nobody is signed in: the CLIENT (an outside person) using a portal link.
+    function anonymous() {
+      return request.auth == null;
+    }
+
     // Money: plain non-negative numbers in dinars (millimes allowed).
     function money(v) {
       return v is number && v >= 0 && v <= 100000000;
@@ -250,6 +259,56 @@ service cloud.firestore {
         allow delete: if isDirector();
         allow create, update: if isDirector() && docId == 'finance' && validFinance(projectId);
       }
+
+      // Quote versions — director ONLY. Editable while 'draft'; once 'sent' to the
+      // client or 'accepted' a version is LOCKED (changes need a new version).
+      match /quoteVersions/{versionId} {
+        allow read: if isDirector();
+        allow create: if isDirector()
+          && validQuote()
+          && versionId == string(request.resource.data.version)
+          && request.resource.data.status == 'draft'
+          && request.resource.data.acceptedAt == null
+          && request.resource.data.createdAt == request.time;
+        allow update: if isDirector()
+          && validQuote()
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['version', 'createdAt'])
+          && (
+            (resource.data.status == 'draft'
+              && request.resource.data.status in ['draft', 'sent']
+              && request.resource.data.acceptedAt == null)
+            || (resource.data.status == 'sent'
+              && request.resource.data.status in ['accepted', 'superseded']
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'acceptedAt', 'acceptedBy', 'updatedAt']))
+            || (resource.data.status == 'accepted'
+              && request.resource.data.status == 'superseded'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))
+          );
+        allow delete: if isDirector() && resource.data.status == 'draft';
+      }
+    }
+
+    // ═══════════════ projects/{id}/quoteVersions/{n} (director only) ═══════════════
+    function validQuote() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['version', 'status', 'deliverables', 'price', 'depositAmount', 'deliveryDate',
+                               'revisionsIncluded', 'extraRevisionPrice', 'confidential', 'confidentialityPrice',
+                               'paymentTerms', 'validUntil', 'acceptedAt', 'acceptedBy', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['version', 'status', 'deliverables', 'price', 'depositAmount', 'deliveryDate',
+                            'revisionsIncluded', 'extraRevisionPrice', 'confidential', 'confidentialityPrice',
+                            'paymentTerms', 'validUntil', 'acceptedAt', 'acceptedBy', 'createdAt', 'updatedAt'])
+        && d.version is int && d.version >= 1 && d.version <= 1000
+        && d.status in ['draft', 'sent', 'accepted', 'superseded']
+        && d.deliverables is list && d.deliverables.size() <= 30
+        && money(d.price) && money(d.depositAmount) && money(d.extraRevisionPrice) && money(d.confidentialityPrice)
+        && dateOrNull(d.deliveryDate)
+        && d.revisionsIncluded is int && d.revisionsIncluded >= 0 && d.revisionsIncluded <= 50
+        && d.confidential is bool
+        && d.paymentTerms is string && d.paymentTerms.size() <= 3000
+        && d.validUntil is timestamp
+        && dateOrNull(d.acceptedAt)
+        && d.acceptedBy is string && d.acceptedBy.size() <= 100
+        && d.updatedAt == request.time;
     }
 
     // ═══════════════ projects/{id}/private/finance (director only) ═══════════════
@@ -257,7 +316,7 @@ service cloud.firestore {
       let d = request.resource.data;
       return d.keys().hasOnly(['price', 'toolsCost', 'currency', 'commissionRate', 'salesMemberId', 'shares',
                                'depositAmount', 'depositReceivedAt', 'amountPaidByClient', 'clientPaid',
-                               'payments', 'updatedAt'])
+                               'payments', 'extraRevisions', 'updatedAt'])
         && d.keys().hasAll(['price', 'toolsCost', 'currency', 'commissionRate', 'salesMemberId', 'shares',
                             'depositAmount', 'depositReceivedAt', 'amountPaidByClient', 'clientPaid',
                             'payments', 'updatedAt'])
@@ -272,6 +331,8 @@ service cloud.firestore {
         && dateOrNull(d.depositReceivedAt)
         && d.clientPaid is bool
         && d.payments is list
+        // paid revision rounds beyond those included (optional, so older clients stay valid)
+        && (!('extraRevisions' in d) || (d.extraRevisions is list && d.extraRevisions.size() <= 100))
         && d.updatedAt == request.time;
     }
 
@@ -510,15 +571,25 @@ service cloud.firestore {
     // ═══════════════════════ settings/finance (director only) ═══════════════════════
     match /settings/finance {
       allow read: if isDirector();
-      allow create, update: if isDirector()
-        && request.resource.data.keys().hasOnly(['defaultCommissionRate', 'minProjectPrice', 'paymentDelayDays', 'updatedAt'])
-        && request.resource.data.keys().hasAll(['defaultCommissionRate', 'minProjectPrice', 'paymentDelayDays', 'updatedAt'])
-        && request.resource.data.defaultCommissionRate is number
-        && request.resource.data.defaultCommissionRate >= 0 && request.resource.data.defaultCommissionRate <= 100
-        && money(request.resource.data.minProjectPrice)
-        && request.resource.data.paymentDelayDays is int
-        && request.resource.data.paymentDelayDays >= 0 && request.resource.data.paymentDelayDays <= 365
-        && request.resource.data.updatedAt == request.time;
+      allow create, update: if isDirector() && validFinanceSettings();
+    }
+
+    function validFinanceSettings() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['defaultCommissionRate', 'minProjectPrice', 'paymentDelayDays',
+                               'includedRevisions', 'extraRevisionPrice', 'depositPercent',
+                               'confidentialityPrice', 'quoteValidityDays', 'updatedAt'])
+        && d.keys().hasAll(['defaultCommissionRate', 'minProjectPrice', 'paymentDelayDays', 'updatedAt'])
+        && d.defaultCommissionRate is number && d.defaultCommissionRate >= 0 && d.defaultCommissionRate <= 100
+        && money(d.minProjectPrice)
+        && d.paymentDelayDays is int && d.paymentDelayDays >= 0 && d.paymentDelayDays <= 365
+        // quote & agreement defaults (optional, so a settings doc saved by an older app stays valid)
+        && (!('includedRevisions' in d) || (d.includedRevisions is int && d.includedRevisions >= 0 && d.includedRevisions <= 50))
+        && (!('extraRevisionPrice' in d) || money(d.extraRevisionPrice))
+        && (!('depositPercent' in d) || (d.depositPercent is number && d.depositPercent >= 0 && d.depositPercent <= 100))
+        && (!('confidentialityPrice' in d) || money(d.confidentialityPrice))
+        && (!('quoteValidityDays' in d) || (d.quoteValidityDays is int && d.quoteValidityDays >= 1 && d.quoteValidityDays <= 365))
+        && d.updatedAt == request.time;
     }
 
     // ═══════════════════════ payouts/{payoutId} ═══════════════════════
@@ -580,6 +651,83 @@ service cloud.firestore {
         );
 
       allow delete: if isDirector() && resource.data.status != 'paid';
+    }
+
+    // ═══════════════════════ portals/{token} — the CLIENT portal ═══════════════════════
+    // The first thing an OUTSIDE person (the client, never signed in) touches.
+    //   • the doc id IS the secret: a random token of 32–64 letters/digits
+    //   • anonymous users may only GET a portal by its exact token, and only while it is
+    //     not revoked — never list / query, never write
+    //   • signed-in team members (other than the director) cannot read portals at all
+    //   • the doc holds ONLY client-safe copies (title, client name, quote, published items)
+    function validPortal(token) {
+      let d = request.resource.data;
+      return token.matches('[A-Za-z0-9]{32,64}')
+        && d.keys().hasOnly(['projectId', 'projectTitle', 'clientName', 'revoked', 'revokedAt', 'quote', 'items',
+                             'revisionsIncluded', 'revisionsUsed', 'extraRevisionPrice', 'countedItems',
+                             'responsesSeenAt', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['projectId', 'projectTitle', 'clientName', 'revoked', 'revokedAt', 'quote', 'items',
+                            'revisionsIncluded', 'revisionsUsed', 'extraRevisionPrice', 'countedItems',
+                            'responsesSeenAt', 'createdAt', 'updatedAt'])
+        && d.projectId is string && exists(projectPath(d.projectId))
+        && d.projectTitle is string && d.projectTitle.size() <= 200
+        && d.clientName is string && d.clientName.size() <= 200
+        && d.revoked is bool
+        && dateOrNull(d.revokedAt)
+        && (d.quote == null || d.quote is map)
+        && d.items is map && d.items.keys().hasOnly(['quote', 'script', 'storyboard', 'final'])
+        && d.revisionsIncluded is int && d.revisionsIncluded >= 0 && d.revisionsIncluded <= 50
+        && d.revisionsUsed is int && d.revisionsUsed >= 0 && d.revisionsUsed <= 1000
+        && money(d.extraRevisionPrice)
+        && d.countedItems is list && d.countedItems.hasOnly(['final', 'storyboard'])
+        && dateOrNull(d.responsesSeenAt)
+        && d.updatedAt == request.time;
+    }
+
+    // A client response: one per item version (id "<item>_v<version>"), only for the version
+    // that is currently OPEN in a portal that is not revoked. Strict shape and sizes.
+    function validResponse(token, responseId) {
+      let r = request.resource.data;
+      let p = get(portalPath(token)).data;
+      return r.keys().hasOnly(['item', 'version', 'decision', 'name', 'comment', 'extraRoundAck', 'createdAt'])
+        && r.keys().hasAll(['item', 'version', 'decision', 'name', 'comment', 'extraRoundAck', 'createdAt'])
+        && r.item in ['quote', 'script', 'storyboard', 'final']
+        && r.version is int && r.version >= 1 && r.version <= 1000
+        && responseId == r.item + '_v' + string(r.version)
+        && r.decision in ['approved', 'changes_requested']
+        && r.name is string && r.name.size() >= 2 && r.name.size() <= 80
+        && r.comment is string && r.comment.size() <= 2000
+        && (r.decision == 'approved' || r.comment.size() >= 3)
+        && r.extraRoundAck is bool
+        && r.createdAt == request.time
+        && p.revoked == false
+        && p.items[r.item].open == true
+        && p.items[r.item].version == r.version
+        // beyond the included revision rounds, the client must acknowledge the paid round
+        && (r.decision == 'approved'
+            || !(r.item in p.countedItems)
+            || p.revisionsUsed < p.revisionsIncluded
+            || r.extraRoundAck == true);
+    }
+
+    match /portals/{token} {
+      allow get: if isDirector() || (anonymous() && resource.data.revoked == false);
+      allow list: if isDirector();
+      allow create: if isDirector() && validPortal(token)
+        && request.resource.data.revoked == false
+        && request.resource.data.createdAt == request.time;
+      allow update: if isDirector() && validPortal(token)
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['projectId', 'createdAt']);
+      allow delete: if isDirector();
+
+      match /responses/{responseId} {
+        // the client may re-read ITS answer to a version (exact id), the director reads all
+        allow get: if isDirector() || (anonymous() && get(portalPath(token)).data.revoked == false);
+        allow list: if isDirector();
+        // only the anonymous client answers — a team member can never approve on a client's behalf
+        allow create: if anonymous() && validResponse(token, responseId);
+        allow update, delete: if false;
+      }
     }
 
     // ═══════════════════════ notifications/{id} ═══════════════════════

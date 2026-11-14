@@ -4,10 +4,13 @@ import { db } from "../lib/db";
 import { useAuth } from "./AuthContext";
 import { errorMessage } from "../lib/authErrors";
 import { DEFAULT_FINANCE_SETTINGS } from "../lib/finance";
+import type { ProjectResponse } from "../lib/portal";
 import {
   COL,
+  type ClientResponseDoc,
   type FinanceSettings,
   type NotificationDoc,
+  type PortalDoc,
   type PayoutDoc,
   type ProjectDoc,
   type ProjectFinanceDoc,
@@ -31,6 +34,9 @@ interface DataValue {
   /** DIRECTOR ONLY — empty for everyone else, and never subscribed to */
   finances: Record<string, ProjectFinanceDoc>;
   financeSettings: FinanceSettings;
+  /** DIRECTOR ONLY: client portals and the client's responses (all portals) */
+  portals: WithId<PortalDoc>[];
+  responses: ProjectResponse[];
   loaded: boolean;
   error: string | null;
   userName: (uid: string) => string;
@@ -83,6 +89,8 @@ export function DataProvider({ children }: { children: ReactNode }) {
   const [payouts, setPayouts] = useState<WithId<PayoutDoc>[]>([]);
   const [finances, setFinances] = useState<Record<string, ProjectFinanceDoc>>({});
   const [financeSettings, setFinanceSettings] = useState<FinanceSettings>(DEFAULT_FINANCE_SETTINGS);
+  const [portals, setPortals] = useState<WithId<PortalDoc>[]>([]);
+  const [responsesByToken, setResponsesByToken] = useState<Record<string, WithId<ClientResponseDoc>[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState<Record<string, boolean>>({});
   const [attempt, setAttempt] = useState(0);
@@ -152,6 +160,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
           failing("finances"),
         ),
       );
+      offs.push(listen<PortalDoc>(collection(db, COL.portals), setPortals, failing("portals"), done("portals")));
       offs.push(
         onSnapshot(
           doc(db, COL.settings, "finance"),
@@ -163,7 +172,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         ),
       );
     } else {
-      setReady((r) => ({ ...r, finances: true, settings: true }));
+      setReady((r) => ({ ...r, finances: true, settings: true, portals: true }));
     }
 
     if (role === "director") {
@@ -203,6 +212,20 @@ export function DataProvider({ children }: { children: ReactNode }) {
     return () => offs.forEach((off) => off());
   }, [uid, role, attempt]);
 
+  // Director: one listener per portal for the client's responses (portals are few).
+  const portalIds = portals.map((p) => p.id).sort().join(",");
+  useEffect(() => {
+    if (role !== "director" || !portalIds) return;
+    const offs = portalIds.split(",").map((token) =>
+      onSnapshot(
+        collection(db, COL.portals, token, COL.responses),
+        (snap) => setResponsesByToken((m) => ({ ...m, [token]: snap.docs.map((d) => ({ id: d.id, ...(d.data() as ClientResponseDoc) })) })),
+        (e) => console.error("[data] responses", e),
+      ),
+    );
+    return () => offs.forEach((off) => off());
+  }, [role, portalIds]);
+
   const value = useMemo<DataValue>(() => {
     const byId = new Map(users.map((u) => [u.id, u]));
     const merged = new Map([...assigned, ...brought].map((p) => [p.id, p]));
@@ -216,13 +239,15 @@ export function DataProvider({ children }: { children: ReactNode }) {
       payouts,
       finances,
       financeSettings,
-      loaded: ["users", "projects", "tasks", "notifications", "brought", "prospects", "templates", "payouts", "finances", "settings"].every((k) => ready[k]),
+      portals,
+      responses: portals.flatMap((p) => (responsesByToken[p.id] ?? []).map((r) => ({ ...r, token: p.id }))),
+      loaded: ["users", "projects", "tasks", "notifications", "brought", "prospects", "templates", "payouts", "finances", "settings", "portals"].every((k) => ready[k]),
       error,
       userName: (id) => byId.get(id)?.displayName ?? "عضو محذوف",
       directorIds: users.filter((u) => u.role === "director" && u.active).map((u) => u.id),
       reload: () => setAttempt((n) => n + 1),
     };
-  }, [users, assigned, brought, tasks, notifications, prospects, templates, payouts, finances, financeSettings, error, ready]);
+  }, [users, assigned, brought, tasks, notifications, prospects, templates, payouts, finances, financeSettings, portals, responsesByToken, error, ready]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

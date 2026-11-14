@@ -1,11 +1,16 @@
 // Pure finance logic: breakdown, warnings, client payment status, payout plan.
 import { fmtMoney, fmtPercent } from "./money";
-import type { FinanceSettings, PayoutDoc, PayoutType, ProjectFinanceDoc, WithId } from "./types";
+import type { ExtraRevision, FinanceSettings, PayoutDoc, PayoutType, ProjectFinanceDoc, WithId } from "./types";
 
 export const DEFAULT_FINANCE_SETTINGS: FinanceSettings = {
   defaultCommissionRate: 12,
   minProjectPrice: 500,
   paymentDelayDays: 3,
+  includedRevisions: 2,
+  extraRevisionPrice: 50,
+  depositPercent: 30,
+  confidentialityPrice: 100,
+  quoteValidityDays: 15,
 };
 
 export const round3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -16,10 +21,19 @@ export interface FinanceNumbers {
   toolsCost: number;
   shares: Record<string, number>;
   amountPaidByClient: number;
+  extraRevisions?: ExtraRevision[];
 }
 
 export interface Breakdown {
   sharesTotal: number;
+  /** paid revision rounds billed to the client: Σ (fee + tool cost) */
+  extraTotal: number;
+  extraTools: number;
+  extraCount: number;
+  /** what the client owes in total: price + extra rounds */
+  totalDue: number;
+  /** all tool costs: the project's + those of the extra rounds */
+  allTools: number;
   margin: number;
   /** margin as a fraction of the price (0 when price is 0) */
   marginRatio: number;
@@ -32,8 +46,14 @@ export interface Breakdown {
  */
 export function breakdown(f: FinanceNumbers): Breakdown {
   const sharesTotal = round3(Object.values(f.shares).reduce((a, b) => a + b, 0));
-  const margin = round3(f.price - f.toolsCost - sharesTotal);
-  return { sharesTotal, margin, marginRatio: f.price > 0 ? margin / f.price : 0 };
+  const extras = f.extraRevisions ?? [];
+  const extraTools = round3(extras.reduce((n, x) => n + x.toolsCost, 0));
+  const extraTotal = round3(extras.reduce((n, x) => n + x.fee + x.toolsCost, 0));
+  const totalDue = round3(f.price + extraTotal);
+  const allTools = round3(f.toolsCost + extraTools);
+  // margin = price + extra rounds billed − every tool cost − shares
+  const margin = round3(totalDue - allTools - sharesTotal);
+  return { sharesTotal, extraTotal, extraTools, extraCount: extras.length, totalDue, allTools, margin, marginRatio: totalDue > 0 ? margin / totalDue : 0 };
 }
 
 export type ClientStatus = "unpaid" | "partial" | "paid";

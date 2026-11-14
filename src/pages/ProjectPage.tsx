@@ -1,12 +1,16 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowRight, Building2, Check, ChevronLeft, Link2, Loader2, Plus, Undo2, Users } from "lucide-react";
+import { ArrowRight, Building2, Check, ChevronLeft, FileText, Handshake, Link2, Loader2, Plus, ShieldAlert, Undo2, Users } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useData } from "../context/DataContext";
 import { DriveLink, DueDate, ErrorNote, Initial } from "../components/Bits";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { MembersModal, NewTaskModal } from "../components/Forms";
 import { FinanceBlock } from "../components/FinanceBlock";
+import { Modal } from "../components/Modal";
+import { useProjectClient, useQuoteVersions } from "../hooks/useProjectClient";
+import { moveWithOverride } from "../lib/clientActions";
+import { REVIEW_LABELS, answerFor, clientGate } from "../lib/portal";
 import { TaskCard } from "../components/TaskViews";
 import { moveProjectStage } from "../lib/actions";
 import { errorMessage } from "../lib/authErrors";
@@ -16,8 +20,12 @@ import { byDue, prevStage, stageGate, stageIndex } from "../lib/workflow";
 
 export function ProjectPage() {
   const { projectId } = useParams();
-  const { isDirector } = useAuth();
-  const { projects, tasks, users, prospects, loaded } = useData();
+  const { isDirector, profile } = useAuth();
+  const { projects, tasks, users, prospects, finances, loaded } = useData();
+  const client = useProjectClient(projectId);
+  const quotes = useQuoteVersions(isDirector ? projectId : undefined);
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
   const project = projects.find((p) => p.id === projectId);
 
   const [newTask, setNewTask] = useState(false);
@@ -44,6 +52,9 @@ export function ProjectPage() {
   }
 
   const gate = stageGate(project, tasks);
+  // client approvals (script before production, final video before delivery) — director only
+  const cg = isDirector ? clientGate(project, gate.next, client.active, client.responses, finances[project.id]) : { blocked: false, reasons: [], overridden: false };
+  const lastOverride = (project.gateOverrides ?? []).filter((o) => o.from === project.stage && o.to === gate.next).pop();
   const back = prevStage(project.stage);
   const idx = stageIndex(project.stage);
 
@@ -112,6 +123,16 @@ export function ProjectPage() {
                 {gate.message}
               </p>
             )}
+            {(cg.blocked || cg.overridden) && (
+              <div data-testid="client-gate" className={`rounded-xl border p-3 text-sm leading-7 ${cg.blocked ? "border-crimson/40 bg-crimson/10 text-crimson-text" : "border-line bg-surface-2 text-muted"}`}>
+                <p className="flex items-center gap-2 font-bold"><ShieldAlert className="size-4" aria-hidden /> {cg.blocked ? `لا يمكن الانتقال إلى «${STAGE_LABELS[gate.next!]}» قبل موافقة الزبون:` : "تم تجاوز شرط موافقة الزبون:"}</p>
+                <ul className="ms-5 list-disc">{cg.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
+                {cg.overridden && lastOverride && <p className="mt-1">السبب المسجَّل: «{lastOverride.reason}»</p>}
+                {cg.blocked && gate.canAdvance && (
+                  <button className="mt-2 text-sm font-semibold underline" onClick={() => setOverrideOpen(true)}>تجاوز الشرط مع تسجيل السبب…</button>
+                )}
+              </div>
+            )}
             {gate.next && gate.canAdvance && idx === STAGES.length - 2 && (
               <p className="text-sm text-muted">هذه آخر مرحلة قبل التسليم، وقد اجتازت مراجعة الجودة.</p>
             )}
@@ -120,7 +141,7 @@ export function ProjectPage() {
                 <button
                   data-testid="advance"
                   className="btn-primary"
-                  disabled={!gate.canAdvance || busy}
+                  disabled={!gate.canAdvance || cg.blocked || busy}
                   onClick={() => move(gate.next!)}
                 >
                   {busy && <Loader2 className="size-5 animate-spin" aria-hidden />}
@@ -139,6 +160,29 @@ export function ProjectPage() {
           </div>
         )}
       </section>
+
+      {/* ── client & agreement (director) ── */}
+      {isDirector && (
+        <section aria-label="الزبون والاتفاق" data-testid="client-card" className="card mb-5 p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="flex items-center gap-2 text-lg font-bold"><Handshake className="size-5 text-crimson-text" aria-hidden /> الزبون والاتفاق</h2>
+            <b data-testid="project-revisions" className={client.stats.used > client.stats.included ? "text-amber-300" : ""}>جولات التعديل: <bdi dir="ltr">{client.stats.used} / {client.stats.included}</bdi></b>
+          </div>
+          <div className="grid gap-2 text-sm sm:grid-cols-2">
+            <p>عرض السعر: <b>{(() => { const v = quotes?.[quotes.length - 1]; return !v ? "لا يوجد" : v.status === "accepted" ? `مقبول (النسخة ${v.version})` : v.status === "sent" ? `بانتظار الزبون (النسخة ${v.version})` : `مسودة (النسخة ${v.version})`; })()}</b></p>
+            <p>رابط الزبون: <b>{client.active ? "نشِط" : client.portals.length ? "ملغى" : "لم يُنشأ"}</b>{client.unseen.length > 0 && <span className="ms-2 badge border-crimson/40 bg-crimson/15 text-crimson-text">{client.unseen.length} رد جديد</span>}</p>
+            {(["script", "final"] as const).map((k) => {
+              const it = client.active?.items[k];
+              const a = it ? answerFor(client.responses, k, it.version) : undefined;
+              return <p key={k}>{REVIEW_LABELS[k]}: <b>{!it ? "لم يُنشر" : a?.decision === "approved" ? `وافق الزبون — النسخة ${it.version}` : a ? `طُلبت تعديلات — النسخة ${it.version}` : `بانتظار الزبون — النسخة ${it.version}`}</b></p>;
+            })}
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link to={`/projects/${project.id}/quote`} className="btn-ghost min-h-10 px-3.5 text-sm"><FileText className="size-4" aria-hidden /> عرض السعر</Link>
+            <Link to={`/projects/${project.id}/client`} className="btn-ghost min-h-10 px-3.5 text-sm"><Link2 className="size-4" aria-hidden /> بوابة الزبون والردود</Link>
+          </div>
+        </section>
+      )}
 
       {/* ── details ── */}
       <section aria-label="تفاصيل المشروع" className="card mb-6 space-y-4 p-5">
@@ -231,6 +275,21 @@ export function ProjectPage() {
 
       {newTask && <NewTaskModal project={project} defaultStage={project.stage} onClose={() => setNewTask(false)} />}
       {editMembers && <MembersModal project={project} onClose={() => setEditMembers(false)} />}
+      {overrideOpen && gate.next && (
+        <Modal title="تجاوز شرط موافقة الزبون" onClose={() => setOverrideOpen(false)}>
+          <div className="space-y-4">
+            <ul className="ms-5 list-disc text-sm leading-7 text-muted">{cg.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
+            <div>
+              <label htmlFor="override-reason" className="label">سبب التجاوز (يُسجَّل في المشروع)</label>
+              <textarea id="override-reason" className="input h-auto min-h-24 py-3 leading-7" value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)} maxLength={500} />
+            </div>
+            <button className="btn-primary w-full" disabled={busy || overrideReason.trim().length < 5}
+              onClick={async () => { setBusy(true); setError(null); try { await moveWithOverride(project.id, project.stage, gate.next!, overrideReason, profile!.id); setOverrideOpen(false); setOverrideReason(""); } catch (e) { setError(errorMessage(e)); } finally { setBusy(false); } }}>
+              تجاوز والانتقال إلى «{STAGE_LABELS[gate.next]}»
+            </button>
+          </div>
+        </Modal>
+      )}
       {confirmBack && back && (
         <ConfirmDialog
           title="إرجاع المشروع؟"

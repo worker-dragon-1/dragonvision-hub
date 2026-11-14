@@ -97,11 +97,27 @@ beforeEach(async () => {
     await setDoc(doc(db, "prospects/pr2/activities/a2"), { type: "note", channel: "phone", text: "x", createdBy: "sales2", createdAt: new Date() });
     await setDoc(doc(db, "templates/tpl1"), { title: "T", body: "Hi {name}", createdBy: "director1", createdAt: new Date(), updatedAt: new Date() });
 
+    // client portals
+    const item = (version: number, open: boolean) => ({ version, open, title: "T", note: "", link: "", text: "", publishedAt: new Date() });
+    const portal = (revoked: boolean) => ({
+      projectId: "p1", projectTitle: "P", clientName: "C", revoked, revokedAt: null, quote: null,
+      items: { quote: item(1, true), script: item(2, false), final: item(3, true) },
+      revisionsIncluded: 2, revisionsUsed: 2, extraRevisionPrice: 50, countedItems: ["final"],
+      responsesSeenAt: null, createdAt: new Date(), updatedAt: new Date(),
+    });
+    await setDoc(doc(db, `portals/${TOKEN}`), portal(false));
+    await setDoc(doc(db, `portals/${REVOKED}`), portal(true));
+    await setDoc(doc(db, `portals/${TOKEN}/responses/script_v1`), { item: "script", version: 1, decision: "approved", name: "Client", comment: "", extraRoundAck: false, createdAt: new Date() });
+
     const note = (userId: string) => ({ userId, type: "task_assigned", projectId: "p1", taskId: "t1", text: "x", read: false, createdAt: new Date() });
     await setDoc(doc(db, "notifications/n1"), note("editor1"));
     await setDoc(doc(db, "notifications/n2"), note("editor2"));
   });
 });
+
+const TOKEN = "Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb3dEf6h"; // 40 chars, like the app's tokens
+const REVOKED = "Zz9yXx8wVv7uTt6sRr5qPp4oNn3mLl2kJj1iHh0g";
+const anon = () => env.unauthenticatedContext().firestore();
 
 const as = (uid: string) =>
   env.authenticatedContext(uid, { email: `${uid}@example.com`, email_verified: true }).firestore();
@@ -277,5 +293,75 @@ describe("critical permissions", () => {
     await assertSucceeds(setDocClient(doc(as("director1"), "settings/finance"), settings)); // control
     await assertSucceeds(getDoc(doc(as("director1"), "settings/finance")));
     await assertFails(getDoc(doc(as("editor1"), "settings/finance"))); // still denied once it exists
+  });
+  // ── Client portal (outside users) ─────────────────────────────────────────
+  it("17. an unauthenticated user cannot list portals, and can get only by exact id", async () => {
+    const db = anon();
+    await assertSucceeds(getDoc(doc(db, `portals/${TOKEN}`))); // exact token
+    await assertFails(getDocs(collection(db, "portals")));
+    await assertFails(getDocs(query(collection(db, "portals"), where("projectId", "==", "p1"))));
+    await assertFails(getDoc(doc(db, `portals/${TOKEN.slice(0, -1)}x`))); // a guess
+    await assertFails(getDoc(doc(db, `portals/${REVOKED}`))); // revoked → nothing
+  });
+
+  it("18. an unauthenticated user cannot update or delete a portal document", async () => {
+    const db = anon();
+    await assertFails(updateDoc(doc(db, `portals/${TOKEN}`), { projectTitle: "hacked", updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(db, `portals/${REVOKED}`), { revoked: false, updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(doc(db, `portals/${TOKEN}`)));
+    await assertFails(setDocClient(doc(db, `portals/${"N".repeat(40)}`), { projectId: "p1" }));
+  });
+
+  it("19. a client response is rejected when the item/version is not open, the portal is revoked, or the shape/size is invalid", async () => {
+    const db = anon();
+    const r = (item: string, version: number, extra: Record<string, unknown> = {}) => ({
+      item, version, decision: "approved", name: "سلمى الهادي", comment: "", extraRoundAck: false, createdAt: serverTimestamp(), ...extra,
+    });
+    const at = (t: string, id: string) => doc(db, `portals/${t}/responses/${id}`);
+    await assertFails(setDocClient(at(TOKEN, "script_v2"), r("script", 2))); // not open
+    await assertFails(setDocClient(at(TOKEN, "final_v2"), r("final", 2))); // not the open version
+    await assertFails(setDocClient(at(REVOKED, "final_v3"), r("final", 3))); // revoked portal
+    await assertFails(setDocClient(at(TOKEN, "final_v9"), r("final", 3))); // id ≠ item_vVersion
+    await assertFails(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1, { name: "x" }))); // name too short
+    await assertFails(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1, { comment: "a".repeat(2001) }))); // too long
+    await assertFails(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1, { decision: "maybe" })));
+    await assertFails(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1, { isAdmin: true }))); // extra key
+    await assertFails(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1, { createdAt: new Date(2020, 0, 1) }))); // back-dated
+    await assertFails(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1, { decision: "changes_requested", comment: "" }))); // comment required
+    // beyond the included rounds, a change request must acknowledge the paid round
+    await assertFails(setDocClient(at(TOKEN, "final_v3"), r("final", 3, { decision: "changes_requested", comment: "غيّروا الموسيقى" })));
+    await assertSucceeds(setDocClient(at(TOKEN, "final_v3"), r("final", 3, { decision: "changes_requested", comment: "غيّروا الموسيقى", extraRoundAck: true })));
+    // control: a valid approval works — once (create-only, one answer per version)
+    await assertSucceeds(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1)));
+    await assertFails(setDocClient(at(TOKEN, "quote_v1"), r("quote", 1)));
+    await assertFails(updateDoc(at(TOKEN, "quote_v1"), { name: "someone else" }));
+    await assertFails(deleteDoc(at(TOKEN, "quote_v1")));
+  });
+
+  it("20. an unauthenticated user cannot read any project, task, finance, payout, prospect or user document", async () => {
+    const db = anon();
+    for (const path of ["projects/p1", "tasks/t1", "projects/p1/private/finance", "payouts/p1_editor1_fee", "prospects/pr1", "users/editor1", "settings/finance", "templates/tpl1", "notifications/n1"]) {
+      await assertFails(getDoc(doc(db, path)));
+    }
+    for (const coll of ["projects", "tasks", "payouts", "prospects", "users"]) await assertFails(getDocs(collection(db, coll)));
+  });
+
+  it("21. a non-director member cannot read portals or client responses", async () => {
+    for (const uid of ["editor1", "sales1"]) {
+      const db = as(uid);
+      await assertFails(getDoc(doc(db, `portals/${TOKEN}`)));
+      await assertFails(getDocs(collection(db, "portals")));
+      await assertFails(getDoc(doc(db, `portals/${TOKEN}/responses/script_v1`)));
+      await assertFails(getDocs(collection(db, `portals/${TOKEN}/responses`)));
+      // …and cannot answer on the client's behalf
+      await assertFails(setDocClient(doc(db, `portals/${TOKEN}/responses/quote_v1`), {
+        item: "quote", version: 1, decision: "approved", name: "Fake Client", comment: "", extraRoundAck: false, createdAt: serverTimestamp(),
+      }));
+    }
+    // controls: the director reads everything; the anonymous client re-reads its own answer by exact id
+    await assertSucceeds(getDoc(doc(as("director1"), `portals/${TOKEN}`)));
+    await assertSucceeds(getDocs(collection(as("director1"), `portals/${TOKEN}/responses`)));
+    await assertSucceeds(getDoc(doc(anon(), `portals/${TOKEN}/responses/script_v1`)));
+    await assertFails(getDocs(collection(anon(), `portals/${TOKEN}/responses`)));
   });
 });

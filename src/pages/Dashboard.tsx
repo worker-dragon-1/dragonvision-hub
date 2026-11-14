@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { AlarmClock, CalendarCheck, ClipboardCheck, Wallet } from "lucide-react";
+import { AlarmClock, CalendarCheck, ClipboardCheck, MessagesSquare, Wallet } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useData } from "../context/DataContext";
 import { PageHeader } from "../components/PageHeader";
@@ -22,13 +22,15 @@ const ltr = (s: string) => <bdi dir="ltr">{s}</bdi>;
 
 export function DashboardPage() {
   const { profile } = useAuth();
-  const { tasks, projects, prospects, payouts, finances, users, loaded } = useData();
+  const { tasks, projects, prospects, payouts, finances, users, portals, responses, loaded } = useData();
 
   const now = Date.now();
   const inReview = tasks.filter((t) => t.status === "in_review").length;
   const overdue = tasks.filter((t) => t.status !== "approved" && t.dueDate && t.dueDate.toMillis() < now).length;
   const followUps = prospects.filter((p) => followUpBucket(p) <= 1).length;
   const ready = payouts.filter((p) => p.status === "ready");
+  const seenAt = Object.fromEntries(portals.map((p) => [p.id, p.responsesSeenAt?.toMillis() ?? 0]));
+  const newResponses = responses.filter((r) => (r.createdAt?.toMillis() ?? Date.now()) > (seenAt[r.token] ?? 0)).length;
   const readyTotal = Math.round(ready.reduce((n, p) => n + p.amount, 0) * 1000) / 1000;
 
   const perStage = useMemo(() => STAGES.map((s) => ({ stage: s, count: projects.filter((p) => p.stage === s).length })), [projects]);
@@ -40,7 +42,7 @@ export function DashboardPage() {
     <div className="mx-auto max-w-5xl">
       <PageHeader title="لوحة المخرج" subtitle={loaded ? `أهلاً ${profile?.displayName ?? ""}` : undefined} />
 
-      <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-5">
         <Link to="/review" data-testid="card-review" className={`card block p-4 transition-colors hover:border-muted/60 ${inReview ? "border-amber-400/30 bg-amber-400/5" : ""}`}>
           <ClipboardCheck className="mb-2 size-5 text-amber-300" aria-hidden />
           <p className="text-sm text-muted">مهام بانتظار المراجعة</p>
@@ -55,6 +57,12 @@ export function DashboardPage() {
           <CalendarCheck className="mb-2 size-5 text-sky-300" aria-hidden />
           <p className="text-sm text-muted">متابعات اليوم</p>
           <p className="mt-1 text-3xl font-extrabold">{followUps}</p>
+        </Link>
+        <Link to="/responses" data-testid="card-responses" className={`card block p-4 transition-colors hover:border-muted/60 ${newResponses ? "border-crimson/40 bg-crimson/5" : ""}`}>
+          <MessagesSquare className="mb-2 size-5 text-crimson-text" aria-hidden />
+          <p className="text-sm text-muted">ردود الزبائن</p>
+          <p className="mt-1 text-3xl font-extrabold">{newResponses}</p>
+          <p className="mt-0.5 text-xs text-muted">ردود جديدة</p>
         </Link>
         <Link to="/payouts?status=ready" data-testid="card-payouts" className={`card block p-4 transition-colors hover:border-muted/60 ${ready.length ? "border-emerald-400/30 bg-emerald-400/5" : ""}`}>
           <Wallet className="mb-2 size-5 text-emerald-300" aria-hidden />

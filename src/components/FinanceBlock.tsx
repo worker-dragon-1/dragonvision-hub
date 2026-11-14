@@ -41,9 +41,13 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
   const [deposit, setDeposit] = useState(saved ? String(saved.depositAmount) : "");
   const [depositDate, setDepositDate] = useState(toInputDate(saved?.depositReceivedAt));
   const [paid, setPaid] = useState(saved ? String(saved.amountPaidByClient) : "");
-  const [shares, setShares] = useState<Record<string, string>>(
-    Object.fromEntries(members.map((m) => [m.id, saved?.shares[m.id] ? String(saved.shares[m.id]) : ""])),
-  );
+  const sharesFrom = (doc: typeof saved) =>
+    Object.fromEntries(members.map((m) => [m.id, doc?.shares[m.id] ? String(doc.shares[m.id]) : ""]));
+  const [shares, setShares] = useState<Record<string, string>>(sharesFrom(saved));
+  // The document the form was last loaded from. When the saved document changes underneath
+  // (late snapshot on a fresh load, a quote accepted, a paid round added) and the director has
+  // no unsaved edits, the form follows it.
+  const [base, setBase] = useState(saved);
   const [busy, setBusy] = useState<"save" | "payouts" | "ready" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<string[] | null>(null);
@@ -60,16 +64,30 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
     toolsCost: n(parsed.toolsCost),
     shares: Object.fromEntries(Object.entries(shareValues).filter(([, v]) => n(v) > 0).map(([k, v]) => [k, n(v)])),
     amountPaidByClient: n(parsed.amountPaidByClient),
+    extraRevisions: saved?.extraRevisions ?? [],
   };
   const b = breakdown(draft);
   const warnings = financeWarnings(draft, financeSettings.minProjectPrice);
-  const status = clientStatus(draft.price, draft.amountPaidByClient);
+  const status = clientStatus(b.totalDue, draft.amountPaidByClient);
 
-  const dirty =
-    !saved ||
-    saved.price !== draft.price || saved.toolsCost !== draft.toolsCost || saved.amountPaidByClient !== draft.amountPaidByClient ||
-    saved.depositAmount !== n(parsed.depositAmount) || toInputDate(saved.depositReceivedAt) !== depositDate ||
-    JSON.stringify(saved.shares) !== JSON.stringify(draft.shares);
+  const differsFrom = (doc: typeof saved) =>
+    !doc ||
+    doc.price !== draft.price || doc.toolsCost !== draft.toolsCost || doc.amountPaidByClient !== draft.amountPaidByClient ||
+    doc.depositAmount !== n(parsed.depositAmount) || toInputDate(doc.depositReceivedAt) !== depositDate ||
+    JSON.stringify(doc.shares) !== JSON.stringify(draft.shares);
+  if (saved !== base) {
+    const hasEdits = base ? differsFrom(base) : [price, tools, deposit, paid, depositDate, ...Object.values(shares)].some((v) => v !== "");
+    if (saved && !hasEdits) {
+      setPrice(String(saved.price));
+      setTools(String(saved.toolsCost));
+      setDeposit(String(saved.depositAmount));
+      setDepositDate(toInputDate(saved.depositReceivedAt));
+      setPaid(String(saved.amountPaidByClient));
+      setShares(sharesFrom(saved));
+    }
+    setBase(saved);
+  }
+  const dirty = differsFrom(saved);
 
   const projectPayouts = payouts.filter((p) => p.projectId === project.id);
   const awaiting = projectPayouts.filter((p) => p.status === "awaiting_client_payment");
@@ -160,7 +178,7 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
           <p data-testid="client-status" className={`mt-1 font-bold ${status === "paid" ? "text-emerald-300" : status === "partial" ? "text-amber-300" : ""}`}>
             {CLIENT_STATUS_LABELS[status]}
           </p>
-          {draft.price > 0 && status !== "paid" && <p className="mt-0.5 text-xs text-muted">المتبقي: {fmtMoney(Math.max(0, draft.price - draft.amountPaidByClient))}</p>}
+          {b.totalDue > 0 && status !== "paid" && <p className="mt-0.5 text-xs text-muted">المتبقي: {fmtMoney(Math.max(0, b.totalDue - draft.amountPaidByClient))}</p>}
         </div>
       </div>
 
@@ -197,7 +215,8 @@ export function FinanceBlock({ project }: { project: WithId<ProjectDoc> }) {
       {/* live breakdown */}
       <div data-testid="breakdown" className="mt-5 max-w-lg rounded-xl border border-line bg-surface-2 p-4">
         <Line label="سعر المشروع" value={fmtMoney(draft.price)} />
-        <Line label="تكلفة الأدوات" value={fmtMoney(-draft.toolsCost)} />
+        {b.extraCount > 0 && <Line label={`تعديلات إضافية مدفوعة (${b.extraCount})`} value={fmtMoney(b.extraTotal)} />}
+        <Line label={b.extraCount > 0 ? "تكلفة الأدوات (مع التعديلات الإضافية)" : "تكلفة الأدوات"} value={fmtMoney(-b.allTools)} />
         <Line label="حصص الفريق" value={fmtMoney(-b.sharesTotal)} />
         <Line
           strong

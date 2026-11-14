@@ -34,6 +34,13 @@ const DashboardPage = lazy(() => import("./pages/Dashboard").then((m) => ({ defa
 const PayoutsPage = lazy(() => import("./pages/Payouts").then((m) => ({ default: m.PayoutsPage })));
 const MyPayoutsPage = lazy(() => import("./pages/Payouts").then((m) => ({ default: m.MyPayoutsPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const QuotePage = lazy(() => import("./pages/QuotePage").then((m) => ({ default: m.QuotePage })));
+const QuotePrint = lazy(() => import("./pages/QuotePrint").then((m) => ({ default: m.QuotePrint })));
+const ClientPage = lazy(() => import("./pages/ClientPage").then((m) => ({ default: m.ClientPage })));
+const ResponsesPage = lazy(() => import("./pages/ResponsesPage").then((m) => ({ default: m.ResponsesPage })));
+// The client portal: an outside person, no sign-in, no team app around it.
+const PortalPage = lazy(() => import("./pages/PortalPage").then((m) => ({ default: m.PortalPage })));
+const DIRECTOR_ONLY = ["director"] as const;
 
 const PAGES: Partial<Record<RouteKey, ReactNode>> = {
   team: <TeamPage />,
@@ -56,6 +63,7 @@ function AppRoutes() {
   return (
     <Suspense fallback={<PageLoading />}>
     <Routes>
+      <Route path="/projects/:projectId/quote/print/:version" element={<RequireRole roles={DIRECTOR_ONLY}><QuotePrint /></RequireRole>} />
       <Route element={<Layout />}>
         <Route index element={<Navigate to={homeFor(role)} replace />} />
         {(Object.keys(ROUTES) as RouteKey[]).map((key) => {
@@ -68,6 +76,9 @@ function AppRoutes() {
             />
           );
         })}
+        <Route path="/projects/:projectId/quote" element={<RequireRole roles={DIRECTOR_ONLY}><QuotePage /></RequireRole>} />
+        <Route path="/projects/:projectId/client" element={<RequireRole roles={DIRECTOR_ONLY}><ClientPage /></RequireRole>} />
+        <Route path="/responses" element={<RequireRole roles={DIRECTOR_ONLY}><ResponsesPage /></RequireRole>} />
         <Route
           path="/projects/:projectId"
           element={<RequireRole roles={ROUTES.projects.roles}><ProjectPage /></RequireRole>}
@@ -111,6 +122,15 @@ function Gate() {
 
 export default function App() {
   if (!isConfigured) return <SetupScreen />;
+  // /p/<token>: the client portal — rendered on its own, outside the team app and its auth gate.
+  const portal = /^\/p\/([^/]+)\/?$/.exec(window.location.pathname);
+  if (portal) {
+    return (
+      <Suspense fallback={<LoadingScreen />}>
+        <PortalPage token={decodeURIComponent(portal[1])} />
+      </Suspense>
+    );
+  }
   return (
     <AuthProvider>
       <BrowserRouter>

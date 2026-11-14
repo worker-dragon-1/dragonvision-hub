@@ -64,7 +64,7 @@ export function moneyThisMonth(
     const f = finances[p.id];
     if (!f) continue;
     revenue += f.payments.filter((x) => isThisMonth(x.at.toMillis())).reduce((n, x) => n + x.amount, 0);
-    outstanding += Math.max(0, f.price - f.amountPaidByClient);
+    outstanding += Math.max(0, breakdown(f).totalDue - f.amountPaidByClient);
     const deliveredMs = (p.deliveredAt ?? p.updatedAt)?.toMillis?.() ?? 0;
     if (p.stage === "delivered" && isThisMonth(deliveredMs)) margin += breakdown(f).margin;
   }
